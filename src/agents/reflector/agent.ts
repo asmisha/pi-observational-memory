@@ -6,6 +6,7 @@ import { debugLog } from "../../debug-log.js";
 import { hashId } from "../../ids.js";
 import { logAgentStreamError } from "../stream-errors.js";
 import { resolveWorkerStreamSimple, type StreamableModelRegistry, type WorkerStreamSimple } from "../worker-stream.js";
+import { createUsageTracker } from "../usage.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
@@ -217,7 +218,9 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 		resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple),
 	);
 	let streamError: { stopReason: string; errorMessage?: string } | undefined;
+	const trackUsage = createUsageTracker("reflector");
 	for await (const event of stream) {
+		trackUsage(event);
 		// Tool execution collects records.
 		logAgentStreamError("reflector", event);
 		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, statSync, unlinkSync, appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -60,6 +61,45 @@ export function debugLog(event: string, data: Record<string, unknown> = {}): voi
 		appendFileSync(path, `${JSON.stringify(payload)}\n`, "utf-8");
 	} catch {
 		// Debug logging must never affect memory behavior.
+	}
+}
+
+/** Usage is collected independently of verbose debug logging; no message bodies are accepted. */
+export function logUsage(data: {
+	stage: "observer" | "reflector" | "dropper";
+	provider: string;
+	model: string;
+	stopReason: string;
+	elapsedMs: number | null;
+	usage: {
+		input: number;
+		cacheRead: number;
+		cacheWrite: number;
+		output: number;
+		reasoning?: number;
+		totalTokens: number;
+		estimatedCost?: number;
+	} | null;
+}): void {
+	const context = storage.getStore();
+	// Only calls owned by an extension consolidation have a session context.
+	if (!context) return;
+	try {
+		const sessionId = safeDebugLogSessionId(context.sessionId) ?? "unattributed";
+		const path = join(getAgentDir(), "observational-memory", "usage", `${sessionId}.ndjson`);
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		rotateIfNeeded(path);
+		appendFileSync(path, `${JSON.stringify({
+			ts: new Date().toISOString(),
+			callId: randomUUID(),
+			cwd: context.cwd,
+			sessionId: context.sessionId,
+			sessionFile: context.sessionFile,
+			runId: context.runId,
+			...data,
+		})}\n`, { encoding: "utf-8", mode: 0o600 });
+	} catch {
+		// Accounting failures must not interrupt consolidation or compaction.
 	}
 }
 

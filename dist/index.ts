@@ -1484,6 +1484,7 @@ import {
 
 // src/debug-log.ts
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { existsSync as existsSync2, mkdirSync, renameSync, statSync, unlinkSync, appendFileSync } from "node:fs";
 import { dirname, join as join2 } from "node:path";
 import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
@@ -1524,6 +1525,27 @@ function debugLog(event, data = {}) {
     };
     appendFileSync(path, `${JSON.stringify(payload)}
 `, "utf-8");
+  } catch {
+  }
+}
+function logUsage(data) {
+  const context = storage.getStore();
+  if (!context) return;
+  try {
+    const sessionId = safeDebugLogSessionId(context.sessionId) ?? "unattributed";
+    const path = join2(getAgentDir2(), "observational-memory", "usage", `${sessionId}.ndjson`);
+    mkdirSync(dirname(path), { recursive: true, mode: 448 });
+    rotateIfNeeded(path);
+    appendFileSync(path, `${JSON.stringify({
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      callId: randomUUID(),
+      cwd: context.cwd,
+      sessionId: context.sessionId,
+      sessionFile: context.sessionFile,
+      runId: context.runId,
+      ...data
+    })}
+`, { encoding: "utf-8", mode: 384 });
   } catch {
   }
 }
@@ -1574,6 +1596,41 @@ function resolveWorkerStreamSimple(model, modelRegistry, override) {
   } catch {
   }
   return compatStreamSimple;
+}
+
+// src/agents/usage.ts
+function createUsageTracker(stage) {
+  let startedAt;
+  return (event) => {
+    if (event.type === "turn_start") {
+      startedAt = performance.now();
+      return;
+    }
+    if (event.type === "message_start" && event.message.role === "assistant") {
+      startedAt ??= performance.now();
+      return;
+    }
+    if (event.type !== "message_end" || event.message.role !== "assistant") return;
+    const message = event.message;
+    const usage = message.usage;
+    logUsage({
+      stage,
+      provider: message.provider,
+      model: message.model,
+      stopReason: message.stopReason,
+      elapsedMs: startedAt === void 0 ? null : Math.round(performance.now() - startedAt),
+      usage: usage ? {
+        input: usage.input,
+        cacheRead: usage.cacheRead,
+        cacheWrite: usage.cacheWrite,
+        output: usage.output,
+        reasoning: usage.reasoning,
+        totalTokens: usage.totalTokens,
+        estimatedCost: usage.cost?.total
+      } : null
+    });
+    startedAt = void 0;
+  };
 }
 
 // src/model-budget.ts
@@ -1857,7 +1914,9 @@ ${conversation}`;
     resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
   );
   let streamError;
+  const trackUsage = createUsageTracker("observer");
   for await (const event of stream) {
+    trackUsage(event);
     logAgentStreamError("observer", event);
     const message = event.message;
     if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
@@ -2475,7 +2534,9 @@ This maximum is a hard upper bound, not a target. Drop fewer or none if fewer ob
     resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
   );
   let streamError;
+  const trackUsage = createUsageTracker("dropper");
   for await (const event of stream) {
+    trackUsage(event);
     logAgentStreamError("dropper", event);
     const message = event.message;
     if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
@@ -2749,7 +2810,9 @@ Crystallize any missing durable facts or patterns into new reflections. If nothi
     resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
   );
   let streamError;
+  const trackUsage = createUsageTracker("reflector");
   for await (const event of stream) {
+    trackUsage(event);
     logAgentStreamError("reflector", event);
     const message = event.message;
     if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {

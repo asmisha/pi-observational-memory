@@ -1439,3 +1439,10 @@ describe("bounded worker memory in consolidation", () => {
 		expect(args.priorObservations[0]).toContain("[a3aaaaaaaaaa]");
 	});
 });
+
+it("refuses tree navigation only while a consolidation can still append to the old branch", () => {
+	const state = setup({ entries: [], consolidationInFlight: true });
+	expect(state.fire("session_before_tree")).toEqual({ cancel: true });
+	state.runtime.consolidationInFlight = false;
+	expect(state.fire("session_before_tree")).toBeUndefined();
+});

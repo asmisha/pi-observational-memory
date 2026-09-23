@@ -3094,6 +3094,7 @@ async function runStageWithFallback(ctx, stage, resolved, resolver, work, signal
   }
 }
 function registerConsolidationTrigger(pi, runtime, hooks = {}) {
+  pi.on("session_before_tree", () => runtime.consolidationInFlight ? { cancel: true } : void 0);
   const idleMode = (ctx) => {
     runtime.ensureConfig(ctx.cwd);
     return runtime.config.consolidateWhenIdle === true;

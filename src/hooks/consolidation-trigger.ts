@@ -299,6 +299,9 @@ export type ConsolidationTriggerHooks = {
 };
 
 export function registerConsolidationTrigger(pi: ExtensionAPI, runtime: Runtime, hooks: ConsolidationTriggerHooks = {}): void {
+	// Consolidation appends its result to the active branch. Do not move that
+	// branch while a model request still holds a snapshot of the old history.
+	pi.on("session_before_tree", () => runtime.consolidationInFlight ? { cancel: true } : undefined);
 	const idleMode = (ctx: ConsolidationCtx): boolean => {
 		runtime.ensureConfig(ctx.cwd);
 		return runtime.config.consolidateWhenIdle === true;

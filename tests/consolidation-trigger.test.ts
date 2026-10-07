@@ -4,6 +4,7 @@ const mockAgents = vi.hoisted(() => ({
 	runObserver: vi.fn(),
 	runReflector: vi.fn(),
 	runDropper: vi.fn(),
+	runRetirer: vi.fn(),
 }));
 
 vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
@@ -12,6 +13,7 @@ vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
 }));
 vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: mockAgents.runReflector }));
 vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: mockAgents.runDropper }));
+vi.mock("../src/agents/retirer/agent.js", () => ({ runRetirer: mockAgents.runRetirer }));
 
 import { ObserverStreamError } from "../src/agents/observer/agent.js";
 import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
@@ -19,6 +21,7 @@ import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
+	OM_REFLECTIONS_RETIRED,
 } from "../src/session-ledger/index.js";
 import {
 	compactionEntry,
@@ -28,6 +31,7 @@ import {
 	rawMessage,
 	reflection,
 	reflectionsRecordedEntry,
+	reflectionsRetiredEntry,
 	textCustomMessage,
 	type TestEntry,
 } from "./fixtures/session.js";
@@ -36,9 +40,11 @@ beforeEach(() => {
 	mockAgents.runObserver.mockReset();
 	mockAgents.runReflector.mockReset();
 	mockAgents.runDropper.mockReset();
+	mockAgents.runRetirer.mockReset();
 	mockAgents.runObserver.mockResolvedValue(undefined);
 	mockAgents.runReflector.mockResolvedValue(undefined);
 	mockAgents.runDropper.mockResolvedValue(undefined);
+	mockAgents.runRetirer.mockResolvedValue(undefined);
 });
 
 function setup(args: {
@@ -48,6 +54,9 @@ function setup(args: {
 	observerChunkMaxTokens?: number;
 	observationsPoolMaxTokens?: number;
 	observationsPoolTargetTokens?: number;
+	reflectionsPoolMaxTokens?: number;
+	retirerModel?: { provider: string; id: string; thinking?: string };
+	resolveConfiguredModel?: (ctx: unknown, target: unknown) => Promise<unknown>;
 	workerMemoryMaxTokens?: number;
 	showWorkerNotifications?: boolean;
 	passive?: boolean;
@@ -84,6 +93,8 @@ function setup(args: {
 			workerMemoryMaxTokens: args.workerMemoryMaxTokens,
 			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 100,
 			observationsPoolTargetTokens: args.observationsPoolTargetTokens ?? Math.floor((args.observationsPoolMaxTokens ?? 100) / 2),
+			reflectionsPoolMaxTokens: args.reflectionsPoolMaxTokens ?? 1000,
+			retirerModel: args.retirerModel,
 			agentMaxTurns: 9,
 			agentMaxTokens: 32000,
 			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
@@ -95,14 +106,16 @@ function setup(args: {
 			runtime.consolidationAbortController.abort();
 			return true;
 		}),
-		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
+		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | "retirer" | undefined,
 		resolveFailureNotified: false,
 		lastObserverError: undefined as string | undefined,
 		lastReflectorError: undefined as string | undefined,
 		lastDropperError: undefined as string | undefined,
+		lastRetirerError: undefined as string | undefined,
 		ensureConfig: vi.fn(),
 		resolveModel: vi.fn(async () => ({ ok: true, model: { reasoning: true }, apiKey: "key", headers: { h: "v" } })),
 		resolveFallbackModel: vi.fn(async () => ({ ok: false, reason: "no fallback model configured" })),
+		resolveConfiguredModel: vi.fn(args.resolveConfiguredModel ?? (async () => ({ ok: false, reason: "not configured" }))),
 		launchConsolidationTask: vi.fn((_ctx, work) => {
 			runtime.consolidationInFlight = true;
 			runtime.consolidationAbortController = new AbortController();
@@ -115,11 +128,12 @@ function setup(args: {
 				};
 			});
 		}),
-		recordConsolidationStageError: vi.fn((ctx, phase: "observer" | "reflector" | "dropper", error: unknown) => {
+		recordConsolidationStageError: vi.fn((ctx, phase: "observer" | "reflector" | "dropper" | "retirer", error: unknown) => {
 			const message = error instanceof Error ? error.message : String(error);
 			if (phase === "observer") runtime.lastObserverError = message;
 			if (phase === "reflector") runtime.lastReflectorError = message;
 			if (phase === "dropper") runtime.lastDropperError = message;
+			if (phase === "retirer") runtime.lastRetirerError = message;
 			ctx.ui?.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
 			return message;
 		}),
@@ -641,9 +655,136 @@ describe("V3 consolidation trigger", () => {
 		await runLaunchedWork();
 
 		expect(mockAgents.runReflector).toHaveBeenCalled();
-		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [newRef], observations: [obsA] }));
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [{ ...newRef, recordedAt: "2026-05-02T10:00:00.000Z" }], observations: [obsA] }));
 		expect(pi.appendEntry.mock.calls[0]).toEqual([OM_REFLECTIONS_RECORDED, { reflections: [newRef], coversUpToId: "raw-1" }]);
 		expect(pi.appendEntry.mock.calls[1]).toEqual([OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" }]);
+	});
+
+	describe("retirer stage", () => {
+		const oldRef = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { tokenCount: 20 });
+		const retiredRef = reflection("dddddddddddd", ["aaaaaaaaaaaa"], { tokenCount: 20 });
+		const newRef = reflection("ffffffffffff", ["bbbbbbbbbbbb"], { tokenCount: 20 });
+		const at = "2026-05-02T10:00:00.000Z";
+		const entries = () => [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs-a", { observations: [obsA], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref-old", { reflections: [retiredRef, oldRef], coversUpToId: "raw-1" }),
+			reflectionsRetiredEntry("om-retire-old", { reflectionIds: ["dddddddddddd"], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			observationsRecordedEntry("om-obs-b", { observations: [obsB], coversUpToId: "raw-2" }),
+		];
+
+		it("retires over active reflections once new ones push the pool to its limit", async () => {
+			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+			mockAgents.runRetirer.mockResolvedValueOnce(["eeeeeeeeeeee"]);
+			const { fire, runLaunchedWork, pi } = setup({ entries: entries(), observeAfterTokens: 999, reflectionsPoolMaxTokens: 40 });
+
+			fire();
+			await runLaunchedWork();
+
+			expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ reflections: [{ ...oldRef, recordedAt: at }] }));
+			expect(mockAgents.runRetirer).toHaveBeenCalledWith(expect.objectContaining({
+				reflections: [{ ...oldRef, recordedAt: at }, { ...newRef, recordedAt: at }],
+				thinkingLevel: "minimal",
+				maxTurns: 9,
+			}));
+			expect(pi.appendEntry.mock.calls.at(-1)).toEqual([OM_REFLECTIONS_RETIRED, { reflectionIds: ["eeeeeeeeeeee"], coversUpToId: "raw-2" }]);
+		});
+
+		it("gives the dropper only active reflections", async () => {
+			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+			const { fire, runLaunchedWork } = setup({ entries: entries(), observeAfterTokens: 999, observationsPoolTargetTokens: 5 });
+
+			fire();
+			await runLaunchedWork();
+
+			expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({
+				reflections: [{ ...oldRef, recordedAt: at }, { ...newRef, recordedAt: at }],
+			}));
+		});
+
+		it("does not run while active reflections stay under the limit", async () => {
+			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+			const { fire, runLaunchedWork, pi } = setup({ entries: entries(), observeAfterTokens: 999, reflectionsPoolMaxTokens: 41 });
+
+			fire();
+			await runLaunchedWork();
+
+			expect(mockAgents.runRetirer).not.toHaveBeenCalled();
+			expect(pi.appendEntry.mock.calls.map(([type]) => type)).toEqual([OM_REFLECTIONS_RECORDED]);
+		});
+
+		it("does not run when the reflector recorded nothing new", async () => {
+			const { fire, runLaunchedWork } = setup({ entries: entries(), observeAfterTokens: 999, reflectionsPoolMaxTokens: 1 });
+
+			fire();
+			await runLaunchedWork();
+
+			expect(mockAgents.runReflector).toHaveBeenCalled();
+			expect(mockAgents.runRetirer).not.toHaveBeenCalled();
+		});
+
+		it("appends nothing when the retirer retires nothing", async () => {
+			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+			const { fire, runLaunchedWork, pi } = setup({ entries: entries(), observeAfterTokens: 999, reflectionsPoolMaxTokens: 1 });
+
+			fire();
+			await runLaunchedWork();
+
+			expect(mockAgents.runRetirer).toHaveBeenCalled();
+			expect(pi.appendEntry.mock.calls.map(([type]) => type)).toEqual([OM_REFLECTIONS_RECORDED]);
+		});
+
+		it("uses the configured retirer model and thinking level", async () => {
+			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+			const strong = { reasoning: true, id: "strong" };
+			const resolveConfiguredModel = vi.fn(async () => ({ ok: true, model: strong, apiKey: "strong-key" }));
+			const { fire, runLaunchedWork } = setup({
+				entries: entries(),
+				observeAfterTokens: 999,
+				reflectionsPoolMaxTokens: 1,
+				retirerModel: { provider: "anthropic", id: "strong", thinking: "high" },
+				resolveConfiguredModel,
+			});
+
+			fire();
+			await runLaunchedWork();
+
+			expect(resolveConfiguredModel).toHaveBeenCalledWith(expect.anything(), { provider: "anthropic", id: "strong", thinking: "high" });
+			expect(mockAgents.runRetirer).toHaveBeenCalledWith(expect.objectContaining({ model: strong, apiKey: "strong-key", thinkingLevel: "high" }));
+		});
+
+		it("falls back to the memory model when the retirer model is unavailable", async () => {
+			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+			const { fire, runLaunchedWork, ctx } = setup({
+				entries: entries(),
+				observeAfterTokens: 999,
+				reflectionsPoolMaxTokens: 1,
+				retirerModel: { provider: "anthropic", id: "missing", thinking: "high" },
+				resolveConfiguredModel: async () => ({ ok: false, reason: "model anthropic/missing not found" }),
+			});
+
+			fire();
+			await runLaunchedWork();
+
+			expect(mockAgents.runRetirer).toHaveBeenCalledWith(expect.objectContaining({ apiKey: "key", thinkingLevel: "minimal" }));
+			expect(ctx.ui.notify).toHaveBeenCalledWith(
+				"Observational memory: retirer model unavailable (model anthropic/missing not found), using the memory model",
+				"warning",
+			);
+		});
+
+		it("records a retirer failure without undoing the recorded reflections", async () => {
+			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+			mockAgents.runRetirer.mockRejectedValueOnce(new Error("boom"));
+			const { fire, runLaunchedWork, pi, runtime } = setup({ entries: entries(), observeAfterTokens: 999, reflectionsPoolMaxTokens: 1 });
+
+			fire();
+			await runLaunchedWork();
+
+			expect(runtime.lastRetirerError).toBe("boom");
+			expect(pi.appendEntry.mock.calls.map(([type]) => type)).toEqual([OM_REFLECTIONS_RECORDED]);
+		});
 	});
 
 	it("does not launch dropper-only work when active pool is over target", () => {
@@ -756,7 +897,7 @@ describe("V3 consolidation trigger", () => {
 		fire();
 		await runLaunchedWork();
 
-		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [newRef] }));
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [{ ...newRef, recordedAt: "2026-05-02T10:00:00.000Z" }] }));
 		expect(pi.appendEntry.mock.calls[0]).toEqual([OM_REFLECTIONS_RECORDED, { reflections: [newRef], coversUpToId: "raw-2" }]);
 		expect(pi.appendEntry.mock.calls[1]).toEqual([OM_OBSERVATIONS_DROPPED, { observationIds: ["bbbbbbbbbbbb"], coversUpToId: "raw-2" }]);
 	});

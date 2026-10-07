@@ -43,6 +43,7 @@ describe("V3 config", () => {
 			compactAfterTokensRatio: 0.68,
 			observationsPoolMaxTokens: 20000,
 			observationsPoolTargetTokens: 10000,
+			reflectionsPoolMaxTokens: 10000,
 			agentMaxTurns: 16,
 			agentMaxTokens: 32000,
 			compactionCatchUpMaxChunks: 2,

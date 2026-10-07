@@ -1,6 +1,7 @@
 export const OM_OBSERVATIONS_RECORDED = "om.observations.recorded";
 export const OM_REFLECTIONS_RECORDED = "om.reflections.recorded";
 export const OM_OBSERVATIONS_DROPPED = "om.observations.dropped";
+export const OM_REFLECTIONS_RETIRED = "om.reflections.retired";
 export const OM_FOLDED = "om.folded";
 
 export const RELEVANCE_VALUES = ["low", "medium", "high", "critical"] as const;
@@ -36,6 +37,8 @@ export type Reflection = {
 	content: string;
 	supportingObservationIds: string[];
 	tokenCount: number;
+	/** Timestamp of the ledger entry that recorded it; set when folding, not stored in the record. */
+	recordedAt?: string;
 };
 
 export type ObservationsRecordedEntryData = {
@@ -50,6 +53,12 @@ export type ReflectionsRecordedEntryData = {
 
 export type ObservationsDroppedEntryData = {
 	observationIds: string[];
+	coversUpToId: string;
+};
+
+export type ReflectionsRetiredEntryData = {
+	reflectionIds: string[];
+	/** Reflection coverage marker the retirer saw; projections apply the retirement only where every reflection it kept is visible. */
 	coversUpToId: string;
 };
 
@@ -116,7 +125,8 @@ export function isReflection(value: unknown): value is Reflection {
 		isNonEmptyString(value.content) &&
 		!/\r|\n/.test(value.content) &&
 		isNonEmptyStringArray(value.supportingObservationIds) &&
-		isTokenCount(value.tokenCount)
+		isTokenCount(value.tokenCount) &&
+		(value.recordedAt === undefined || isNonEmptyString(value.recordedAt))
 	);
 }
 
@@ -143,6 +153,11 @@ export function isReflectionsRecordedData(value: unknown): value is ReflectionsR
 export function isObservationsDroppedData(value: unknown): value is ObservationsDroppedEntryData {
 	if (!isPlainRecord(value)) return false;
 	return isNonEmptyStringArray(value.observationIds) && isNonEmptyString(value.coversUpToId);
+}
+
+export function isReflectionsRetiredData(value: unknown): value is ReflectionsRetiredEntryData {
+	if (!isPlainRecord(value)) return false;
+	return isNonEmptyStringArray(value.reflectionIds) && isNonEmptyString(value.coversUpToId);
 }
 
 export function isMemoryDetails(value: unknown): value is MemoryDetails {
@@ -183,6 +198,14 @@ export function isObservationsDroppedEntry(entry: Entry): entry is Entry & {
 	return entry.type === "custom" && entry.customType === OM_OBSERVATIONS_DROPPED && isObservationsDroppedData(entry.data);
 }
 
+export function isReflectionsRetiredEntry(entry: Entry): entry is Entry & {
+	type: "custom";
+	customType: typeof OM_REFLECTIONS_RETIRED;
+	data: ReflectionsRetiredEntryData;
+} {
+	return entry.type === "custom" && entry.customType === OM_REFLECTIONS_RETIRED && isReflectionsRetiredData(entry.data);
+}
+
 export function buildObservationsRecordedData(
 	observations: Observation[],
 	coversUpToId: string,
@@ -205,4 +228,12 @@ export function buildObservationsDroppedData(
 ): ObservationsDroppedEntryData | undefined {
 	if (observationIds.length === 0 || !isNonEmptyString(coversUpToId)) return undefined;
 	return { observationIds, coversUpToId };
+}
+
+export function buildReflectionsRetiredData(
+	reflectionIds: string[],
+	coversUpToId: string,
+): ReflectionsRetiredEntryData | undefined {
+	if (reflectionIds.length === 0 || !isNonEmptyString(coversUpToId)) return undefined;
+	return { reflectionIds, coversUpToId };
 }

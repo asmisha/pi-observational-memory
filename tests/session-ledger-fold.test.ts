@@ -9,6 +9,7 @@ import {
 	oldV2ObservationEntry,
 	reflection,
 	reflectionsRecordedEntry,
+	reflectionsRetiredEntry,
 	textCustomMessage,
 } from "./fixtures/session.js";
 
@@ -31,6 +32,24 @@ describe("session-ledger V3 folding", () => {
 		expect(folded.activeObservations.map((obs) => obs.id)).toEqual(["aaaaaaaaaaaa"]);
 		expect(folded.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
 		expect(folded.observationsById.get("bbbbbbbbbbbb")).toBeUndefined();
+	});
+
+	it("applies retirements as tombstones while preserving reflection history and recording time", () => {
+		const ref1 = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+		const ref2 = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			reflectionsRecordedEntry("om-ref-1", { reflections: [ref1], coversUpToId: "raw-1" }, { timestamp: "2026-05-01T08:00:00.000Z" }),
+			reflectionsRecordedEntry("om-ref-2", { reflections: [ref2], coversUpToId: "raw-1" }, { timestamp: "2026-05-02T09:00:00.000Z" }),
+			reflectionsRetiredEntry("om-retire-1", { reflectionIds: ["eeeeeeeeeeee", "999999999999"], coversUpToId: "om-ref-2" }),
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
+		expect(folded.activeReflections).toEqual([{ ...ref2, recordedAt: "2026-05-02T09:00:00.000Z" }]);
+		expect(Array.from(folded.retiredReflectionIds)).toEqual(["eeeeeeeeeeee", "999999999999"]);
+		expect(folded.reflectionsById.get("eeeeeeeeeeee")).toEqual({ ...ref1, recordedAt: "2026-05-01T08:00:00.000Z" });
 	});
 
 	it("applies drops as tombstones while preserving observation history", () => {

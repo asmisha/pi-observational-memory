@@ -9,7 +9,7 @@ function fmtLocal(d: Date): string {
 	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function formatTimestamp(v: number | string | undefined): string {
+export function formatTimestamp(v: number | string | undefined): string {
 	if (v === undefined) return "????-??-?? ??:??";
 	const d = new Date(v);
 	return Number.isNaN(d.getTime()) ? "????-??-?? ??:??" : fmtLocal(d);

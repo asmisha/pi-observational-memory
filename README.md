@@ -89,6 +89,8 @@ Examples:
 
 Reflections help the agent stay oriented over time. The reflector treats coverage as stewardship: every active observation it reviews includes a `none`, `partial`, or `strong` coverage tier, but those tiers are review context rather than quotas. When the reflector emits a durable reflection, its support ids should cover all and only the observations whose durable meaning is actually preserved, because those ids later become dropper coverage evidence.
 
+Reflections are only ever added, so over a long session they collect duplicates and statements a later reflection has made outdated. After a reflector pass records new reflections, and once active reflections reach `reflectionsPoolMaxTokens`, the retirer reviews them and retires each one that a kept reflection duplicates or supersedes. Retired reflections leave the compaction summary and worker inputs but stay in the ledger, and `recall` still finds them. Each reflection line shows when it was recorded, so when two records conflict the agent can see which is newer.
+
 Together, observations and reflections let Pi carry the important parts of the session forward without depending on fragile summary chains.
 
 ---
@@ -295,6 +297,7 @@ on the `Next compaction` line regardless of mode.
 | `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Tunable because large windows do not always mean strong long-range attention. Must be in `(0, 1)`. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
+| `reflectionsPoolMaxTokens`  | `10000`       | Active-reflection tokens at which the retirer runs after a reflector pass that recorded new reflections. The retirer only removes duplicate or superseded reflections, so the pool can stay above it. |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
 | `agentMaxTokens`            | `32000`       | Maximum output tokens requested for memory-agent loops (observer/reflector/dropper), clamped to the model's own `maxTokens` when available. Lower it for local servers with a modest context window, e.g. `8192`. |
 | `model`                     | session model | Optional memory-worker model override: `{ provider, id, thinking }`.                              |
@@ -302,8 +305,9 @@ on the `Next compaction` line regardless of mode.
 | `compactionCatchUpMaxChunks` | `2`          | Observer chunks the compaction hook runs synchronously to cover unobserved source before Pi's cut, so it can own the compaction instead of delegating. `0` disables. |
 | `workerMemoryMaxTokens`     | derived       | Token budget for the prior memory each memory-worker request carries (newest first; the dropper sees the oldest observations). Unset: a quarter of the memory model's context window, or `16000`. |
 | `consolidateWhenIdle`       | `false`       | Run memory workers only while the agent is idle and abort them when a new run starts. Use when the session model and the memory model share one context budget (e.g. one local llama.cpp server). |
+| `retirerModel`              | memory model  | Optional retirer model: `{ provider, id, thinking }`. Deciding that one reflection supersedes another benefits from a stronger model than recording them. Falls back to the memory model when it cannot be resolved. |
 | `fallbackModel`             | unset         | Optional second memory-worker model: `{ provider, id, thinking }`. Used when the primary memory model fails to resolve, and to retry a worker stage once when its model call errors. |
-| `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, and dropper progress notifications. Warnings and errors are unaffected. |
+| `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, dropper, and retirer progress notifications. Warnings and errors are unaffected. |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
 | `debugLog`                  | `false`       | Writes opt-in per-session extension debug events to Pi's agent directory.                         |
 
@@ -390,7 +394,7 @@ Current behavior:
 * **Fast compaction.** When prepared V3 memory exists, `session_before_compact` renders it without calling a model or waiting for background workers. An empty V3 projection delegates to Pi's native summarizer instead of replacing prior context with an empty summary.
 * **Bounded summaries, fewer native compactions.** The rendered memory summary respects `compactionSummaryMaxTokens`, and when the observer is behind the hook observes the gap synchronously (`compactionCatchUpMaxChunks`) so most compactions stay model-light and structured instead of falling back to Pi's growing prose summary.
 * **No unobserved context is discarded.** Proactive compaction counts only source tokens the observer has covered, and the compaction hook keeps entries the observer has not reached yet in context (within `compactionMaxRetainedTokens`) or delegates to Pi's native summarizer, instead of dropping them with no memory record.
-* **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`.
+* **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`; retirer work runs after a reflection pass that recorded new reflections, once active reflections reach `reflectionsPoolMaxTokens`, and retires duplicate or superseded reflections.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
 * **Visible/full views.** `/om:view` shows visible memory and `/om:view full` shows the full current memory state. Use `/om:status` for visible-vs-full drift and for the separate visible observation pool vs active observation pool.
 * **No V2 compatibility layer.** Old V2 settings and memory entries are ignored rather than migrated.

@@ -16,6 +16,7 @@ import {
 	oldV2CompactionDetails,
 	reflection,
 	reflectionsRecordedEntry,
+	reflectionsRetiredEntry,
 	textCustomMessage,
 } from "./fixtures/session.js";
 
@@ -149,6 +150,48 @@ describe("session-ledger V3 projections", () => {
 		expect(result.details).toMatchObject({ type: "om.folded", version: 1, fullFold: true });
 	});
 
+	describe("reflection retirements", () => {
+		const obs1 = observation("aaaaaaaaaaaa", { tokenCount: 5 });
+		const obs2 = observation("bbbbbbbbbbbb", { tokenCount: 5 });
+		const ref1 = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+		const ref2 = reflection("ffffffffffff", ["bbbbbbbbbbbb"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-aaaaaaaaaaaa", { observations: [obs1], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-eeeeeeeeeeee", { reflections: [ref1], coversUpToId: "raw-1" }),
+			compactionEntry("cmp-full", { firstKeptEntryId: "raw-1", details: memoryDetails({ fullFold: true, observations: [obs1], reflections: [ref1] }) }),
+			textCustomMessage("raw-2", "bbbb"),
+			observationsRecordedEntry("om-bbbbbbbbbbbb", { observations: [obs2], coversUpToId: "raw-2" }),
+			reflectionsRecordedEntry("om-ffffffffffff", { reflections: [ref2], coversUpToId: "raw-2" }),
+			reflectionsRetiredEntry("om-retire-1", { reflectionIds: ["eeeeeeeeeeee"], coversUpToId: "raw-2" }),
+		];
+
+		it("full projection excludes retired reflections", () => {
+			expect(fullProjection(entries).reflections.map((ref) => ref.id)).toEqual(["ffffffffffff"]);
+		});
+
+		it("normal compaction keeps a retirement out until the reflection that replaced it is visible", () => {
+			const result = buildCompactionProjection(entries, "raw-2", { observationsPoolMaxTokens: 100 });
+
+			expect(result.fullFold).toBe(false);
+			expect(result.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
+		});
+
+		it("full-fold compaction applies a retirement covered through the boundary", () => {
+			const result = buildCompactionProjection(entries, "raw-2", { observationsPoolMaxTokens: 10 });
+
+			expect(result.fullFold).toBe(true);
+			expect(result.reflections.map((ref) => ref.id)).toEqual(["ffffffffffff"]);
+		});
+
+		it("reports reflections retired only in the full projection as drift", () => {
+			const visible = { observations: [], reflections: [ref1, ref2] };
+			const full = fullProjection(entries);
+
+			expect(diffProjection(visible, full).retiredOnlyInFull.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
+		});
+	});
+
 	it("ignores dangling coversUpToId markers during projection", () => {
 		const obs1 = observation("aaaaaaaaaaaa", { tokenCount: 10 });
 		const ref1 = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
@@ -179,7 +222,7 @@ describe("session-ledger V3 projections", () => {
 		const projection = fullProjection(entries, "raw-1");
 
 		expect(projection.observations).toEqual([firstObs]);
-		expect(projection.reflections).toEqual([firstRef]);
+		expect(projection.reflections).toEqual([{ ...firstRef, recordedAt: entries[3].timestamp }]);
 	});
 
 	it("uses >= observationsPoolMaxTokens for full-fold pressure", () => {

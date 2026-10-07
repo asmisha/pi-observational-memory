@@ -1,4 +1,4 @@
-import { type Config, DEFAULTS, loadConfig } from "./config.js";
+import { type Config, type ConfiguredModel, DEFAULTS, loadConfig } from "./config.js";
 import { debugLog } from "./debug-log.js";
 
 export type ResolveResult =
@@ -61,7 +61,7 @@ const AVAILABILITY_RECHECK_REARM_MS = 60_000;
 
 type NotifyLevel = "warning" | "info" | "error";
 type Notify = (message: string, type?: NotifyLevel) => void;
-export type ConsolidationPhase = "observer" | "reflector" | "dropper";
+export type ConsolidationPhase = "observer" | "reflector" | "dropper" | "retirer";
 
 /**
  * Whether pi positively reports a working credential source for this model's provider.
@@ -121,6 +121,7 @@ export class Runtime {
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;
 	lastDropperError: string | undefined;
+	lastRetirerError: string | undefined;
 	/** provider -> epoch ms of the last availability re-check (see `recheckProviderCredential`). */
 	availabilityRecheckedAt = new Map<string, number>();
 	/** Deliberate-empty backoff (#23): skip observer re-fires over the same span until enough new tokens arrive. */
@@ -207,6 +208,13 @@ export class Runtime {
 		}
 		const model = ctx.modelRegistry.find(target.provider, target.id);
 		if (!model) return { ok: false, reason: `fallback model ${target.provider}/${target.id} not found` };
+		return this.resolveCandidate(ctx, model);
+	}
+
+	/** Resolve one explicitly configured model (such as `config.retirerModel`) with the same auth rules. */
+	async resolveConfiguredModel(ctx: ResolveCtx, target: ConfiguredModel): Promise<ResolveResult> {
+		const model = ctx.modelRegistry.find(target.provider, target.id);
+		if (!model) return { ok: false, reason: `model ${target.provider}/${target.id} not found` };
 		return this.resolveCandidate(ctx, model);
 	}
 
@@ -364,6 +372,7 @@ export class Runtime {
 		this.lastObserverError = undefined;
 		this.lastReflectorError = undefined;
 		this.lastDropperError = undefined;
+		this.lastRetirerError = undefined;
 		const controller = new AbortController();
 		this.consolidationAbortController = controller;
 		const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
@@ -389,6 +398,7 @@ export class Runtime {
 		if (phase === "observer") this.lastObserverError = message;
 		if (phase === "reflector") this.lastReflectorError = message;
 		if (phase === "dropper") this.lastDropperError = message;
+		if (phase === "retirer") this.lastRetirerError = message;
 		if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
 		return message;
 	}

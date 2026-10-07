@@ -88,11 +88,15 @@ var DEFAULTS = {
   compactAfterTokensRatio: 0.68,
   observationsPoolMaxTokens: 2e4,
   observationsPoolTargetTokens: 1e4,
+  reflectionsPoolMaxTokens: 1e4,
   agentMaxTurns: 16,
   agentMaxTokens: 32e3,
+  compactionCatchUpMaxChunks: 2,
+  consolidateWhenIdle: false,
   showWorkerNotifications: true,
   passive: false,
-  debugLog: false
+  debugLog: false,
+  piAutoCompactionEnabled: true
 };
 var COMPACT_AFTER_TOKENS_MODE_VALUES = ["calibrated", "ratio"];
 function resolveCompactAfterTokens(config, contextWindow) {
@@ -100,6 +104,37 @@ function resolveCompactAfterTokens(config, contextWindow) {
     return Math.max(1, Math.floor(contextWindow * config.compactAfterTokensRatio));
   }
   return config.compactAfterTokens;
+}
+var COMPACTION_RETAINED_FALLBACK_MAX_TOKENS = 6e4;
+var COMPACTION_RETAINED_CONTEXT_RATIO = 0.5;
+function resolveCompactionMaxRetainedTokens(config, contextWindow) {
+  if (config.compactionMaxRetainedTokens !== void 0 && config.compactionMaxRetainedTokens > 0) {
+    return config.compactionMaxRetainedTokens;
+  }
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(1, Math.floor(contextWindow * COMPACTION_RETAINED_CONTEXT_RATIO));
+  }
+  return COMPACTION_RETAINED_FALLBACK_MAX_TOKENS;
+}
+var COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS = 8e3;
+var COMPACTION_SUMMARY_CONTEXT_RATIO = 0.125;
+function resolveCompactionSummaryMaxTokens(config, contextWindow) {
+  if (config.compactionSummaryMaxTokens !== void 0 && config.compactionSummaryMaxTokens > 0) {
+    return config.compactionSummaryMaxTokens;
+  }
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(1, Math.floor(contextWindow * COMPACTION_SUMMARY_CONTEXT_RATIO));
+  }
+  return COMPACTION_SUMMARY_FALLBACK_MAX_TOKENS;
+}
+var WORKER_MEMORY_FALLBACK_MAX_TOKENS = 16e3;
+var WORKER_MEMORY_CONTEXT_RATIO = 0.25;
+function resolveWorkerMemoryMaxTokens(config, contextWindow) {
+  if (config.workerMemoryMaxTokens !== void 0 && config.workerMemoryMaxTokens > 0) return config.workerMemoryMaxTokens;
+  if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
+    return Math.max(1, Math.floor(contextWindow * WORKER_MEMORY_CONTEXT_RATIO));
+  }
+  return WORKER_MEMORY_FALLBACK_MAX_TOKENS;
 }
 var THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 var OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 6e4;
@@ -160,8 +195,12 @@ function normalizeSettingsConfig(value) {
     "reflectAfterTokens",
     "observerChunkMaxTokens",
     "compactAfterTokens",
+    "compactionMaxRetainedTokens",
+    "compactionSummaryMaxTokens",
+    "workerMemoryMaxTokens",
     "observationsPoolMaxTokens",
     "observationsPoolTargetTokens",
+    "reflectionsPoolMaxTokens",
     "agentMaxTurns",
     "agentMaxTokens"
   ];
@@ -169,11 +208,15 @@ function normalizeSettingsConfig(value) {
     const normalizedValue = positiveIntegerOrUndefined(value[key]);
     if (normalizedValue !== void 0) normalized[key] = normalizedValue;
   }
+  if (Number.isInteger(value.compactionCatchUpMaxChunks) && value.compactionCatchUpMaxChunks >= 0) {
+    normalized.compactionCatchUpMaxChunks = value.compactionCatchUpMaxChunks;
+  }
   if (isCompactAfterTokensMode(value.compactAfterTokensMode)) {
     normalized.compactAfterTokensMode = value.compactAfterTokensMode;
   }
   const ratio = validRatioOrUndefined(value.compactAfterTokensRatio);
   if (ratio !== void 0) normalized.compactAfterTokensRatio = ratio;
+  if (typeof value.consolidateWhenIdle === "boolean") normalized.consolidateWhenIdle = value.consolidateWhenIdle;
   if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
   if (typeof value.passive === "boolean") normalized.passive = value.passive;
   if (typeof value.debugLog === "boolean") normalized.debugLog = value.debugLog;
@@ -181,6 +224,8 @@ function normalizeSettingsConfig(value) {
   if (model) normalized.model = model;
   const fallbackModel = normalizeModel(value.fallbackModel);
   if (fallbackModel) normalized.fallbackModel = fallbackModel;
+  const retirerModel = normalizeModel(value.retirerModel);
+  if (retirerModel) normalized.retirerModel = retirerModel;
   return normalized;
 }
 function readEnvConfig(env = process.env) {
@@ -190,6 +235,16 @@ function readEnvConfig(env = process.env) {
   if (["1", "true", "yes", "on"].includes(passive)) return { passive: true };
   if (["0", "false", "no", "off"].includes(passive)) return { passive: false };
   return {};
+}
+function readPiCompactionEnabled(path) {
+  if (!existsSync(path)) return void 0;
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8"));
+    const compaction = raw.compaction;
+    return isRecord(compaction) && typeof compaction.enabled === "boolean" ? compaction.enabled : void 0;
+  } catch {
+    return void 0;
+  }
 }
 function readNamespacedConfig(path) {
   if (!existsSync(path)) return {};
@@ -218,9 +273,11 @@ function loadConfig(cwd, env = process.env) {
     merged.observationsPoolTargetTokens,
     merged.observationsPoolMaxTokens
   ) ?? derivedObservationPoolTarget(merged.observationsPoolMaxTokens);
+  const piAutoCompactionEnabled = readPiCompactionEnabled(projectPath) ?? readPiCompactionEnabled(globalPath) ?? DEFAULTS.piAutoCompactionEnabled;
   return {
     ...merged,
-    observationsPoolTargetTokens: target
+    observationsPoolTargetTokens: target,
+    piAutoCompactionEnabled
   };
 }
 
@@ -228,6 +285,7 @@ function loadConfig(cwd, env = process.env) {
 var OM_OBSERVATIONS_RECORDED = "om.observations.recorded";
 var OM_REFLECTIONS_RECORDED = "om.reflections.recorded";
 var OM_OBSERVATIONS_DROPPED = "om.observations.dropped";
+var OM_REFLECTIONS_RETIRED = "om.reflections.retired";
 var OM_FOLDED = "om.folded";
 var RELEVANCE_VALUES = ["low", "medium", "high", "critical"];
 var MEMORY_ID_PATTERN = /^[a-f0-9]{12}$/;
@@ -255,7 +313,7 @@ function isObservation(value) {
 }
 function isReflection(value) {
   if (!isPlainRecord(value)) return false;
-  return isMemoryId(value.id) && isNonEmptyString(value.content) && !/\r|\n/.test(value.content) && isNonEmptyStringArray(value.supportingObservationIds) && isTokenCount(value.tokenCount);
+  return isMemoryId(value.id) && isNonEmptyString(value.content) && !/\r|\n/.test(value.content) && isNonEmptyStringArray(value.supportingObservationIds) && isTokenCount(value.tokenCount) && (value.recordedAt === void 0 || isNonEmptyString(value.recordedAt));
 }
 function isObservationsRecordedData(value) {
   if (!isPlainRecord(value)) return false;
@@ -269,9 +327,13 @@ function isObservationsDroppedData(value) {
   if (!isPlainRecord(value)) return false;
   return isNonEmptyStringArray(value.observationIds) && isNonEmptyString(value.coversUpToId);
 }
+function isReflectionsRetiredData(value) {
+  if (!isPlainRecord(value)) return false;
+  return isNonEmptyStringArray(value.reflectionIds) && isNonEmptyString(value.coversUpToId);
+}
 function isMemoryDetails(value) {
   if (!isPlainRecord(value)) return false;
-  return value.type === OM_FOLDED && value.version === 1 && typeof value.fullFold === "boolean" && Array.isArray(value.observations) && value.observations.every(isObservation) && Array.isArray(value.reflections) && value.reflections.every(isReflection);
+  return value.type === OM_FOLDED && value.version === 1 && typeof value.fullFold === "boolean" && Array.isArray(value.observations) && value.observations.every(isObservation) && Array.isArray(value.reflections) && value.reflections.every(isReflection) && (value.foldThroughEntryId === void 0 || typeof value.foldThroughEntryId === "string");
 }
 function isObservationsRecordedEntry(entry) {
   return entry.type === "custom" && entry.customType === OM_OBSERVATIONS_RECORDED && isObservationsRecordedData(entry.data);
@@ -281,6 +343,9 @@ function isReflectionsRecordedEntry(entry) {
 }
 function isObservationsDroppedEntry(entry) {
   return entry.type === "custom" && entry.customType === OM_OBSERVATIONS_DROPPED && isObservationsDroppedData(entry.data);
+}
+function isReflectionsRetiredEntry(entry) {
+  return entry.type === "custom" && entry.customType === OM_REFLECTIONS_RETIRED && isReflectionsRetiredData(entry.data);
 }
 function buildObservationsRecordedData(observations, coversUpToId) {
   if (observations.length === 0 || !isNonEmptyString(coversUpToId)) return void 0;
@@ -293,6 +358,10 @@ function buildReflectionsRecordedData(reflections, coversUpToId) {
 function buildObservationsDroppedData(observationIds, coversUpToId) {
   if (observationIds.length === 0 || !isNonEmptyString(coversUpToId)) return void 0;
   return { observationIds, coversUpToId };
+}
+function buildReflectionsRetiredData(reflectionIds, coversUpToId) {
+  if (reflectionIds.length === 0 || !isNonEmptyString(coversUpToId)) return void 0;
+  return { reflectionIds, coversUpToId };
 }
 
 // src/session-ledger/progress.ts
@@ -372,8 +441,15 @@ function rawTokensSinceCoverage(entries, customType) {
 function rawTokensSinceObservationCoverage(entries) {
   return rawTokensSinceCoverage(entries, OM_OBSERVATIONS_RECORDED);
 }
-function rawTokensSinceReflectionCoverage(entries) {
-  return rawTokensSinceCoverage(entries, OM_REFLECTIONS_RECORDED);
+function observedTokensSinceReflectionCoverage(entries) {
+  const reflectionIndex = latestCoverageIndex(entries, OM_REFLECTIONS_RECORDED);
+  const observationIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+  if (observationIndex <= reflectionIndex) return 0;
+  let total = 0;
+  for (let i = reflectionIndex + 1; i <= observationIndex; i++) {
+    if (isSourceEntry(entries[i])) total += estimateEntryTokens(entries[i]);
+  }
+  return total;
 }
 function findLastCompactionIndex(entries) {
   for (let i = entries.length - 1; i >= 0; i--) {
@@ -430,13 +506,41 @@ function realTokensSinceAnchor(entries, customType, currentContextTokens) {
   }
   return Math.max(0, currentContextTokens);
 }
-function rawTokensSinceLastCompaction(entries) {
+function compactionRangeStartIndex(entries) {
   const compactionIndex = findLastCompactionIndex(entries);
-  if (compactionIndex === -1) return rawTokensAfterIndex(entries, -1);
-  const firstKeptEntryId = entries[compactionIndex].firstKeptEntryId;
-  const firstKeptIndex = entryIndexForId(entries, firstKeptEntryId);
-  if (firstKeptIndex === -1) return rawTokensAfterIndex(entries, compactionIndex);
-  return rawTokensAfterIndex(entries, firstKeptIndex - 1);
+  if (compactionIndex === -1) return 0;
+  const firstKeptIndex = entryIndexForId(entries, entries[compactionIndex].firstKeptEntryId);
+  return firstKeptIndex === -1 ? compactionIndex + 1 : firstKeptIndex;
+}
+function rawTokensSinceLastCompaction(entries) {
+  return rawTokensAfterIndex(entries, compactionRangeStartIndex(entries) - 1);
+}
+function observedTokensSinceLastCompaction(entries) {
+  const start = compactionRangeStartIndex(entries);
+  const coverageIndex2 = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+  if (coverageIndex2 < start) return 0;
+  let total = 0;
+  for (let i = start; i <= coverageIndex2; i++) {
+    if (isSourceEntry(entries[i])) total += estimateEntryTokens(entries[i]);
+  }
+  return total;
+}
+function unobservedSourceSpanBefore(entries, cutIndex) {
+  const coverageIndex2 = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+  const start = Math.max(coverageIndex2 + 1, compactionRangeStartIndex(entries));
+  let firstIndex = -1;
+  let lastIndex = -1;
+  let entryCount = 0;
+  let tokens = 0;
+  for (let i = start; i < cutIndex && i < entries.length; i++) {
+    if (!isSourceEntry(entries[i])) continue;
+    if (firstIndex === -1) firstIndex = i;
+    lastIndex = i;
+    entryCount++;
+    tokens += estimateEntryTokens(entries[i]);
+  }
+  if (firstIndex === -1) return void 0;
+  return { firstIndex, lastIndex, entryCount, tokens };
 }
 
 // src/session-ledger/fold.ts
@@ -448,10 +552,15 @@ function foldEndIndex(entries, upToEntryId) {
 function isCustomEntry(entry, customType) {
   return entry.type === "custom" && entry.customType === customType;
 }
+function withRecordedAt(reflection, entry) {
+  if (reflection.recordedAt !== void 0 || !entry.timestamp) return reflection;
+  return { ...reflection, recordedAt: entry.timestamp };
+}
 function foldLedger(entries, options = {}) {
   const observationsById = /* @__PURE__ */ new Map();
   const reflectionsById = /* @__PURE__ */ new Map();
   const droppedObservationIds = /* @__PURE__ */ new Set();
+  const retiredReflectionIds = /* @__PURE__ */ new Set();
   const endIdx = foldEndIndex(entries, options.upToEntryId);
   for (let i = 0; i <= endIdx; i++) {
     const entry = entries[i];
@@ -469,7 +578,7 @@ function foldLedger(entries, options = {}) {
       if (!isReflectionsRecordedData(entry.data)) continue;
       for (const reflection of entry.data.reflections) {
         if (!reflectionsById.has(reflection.id)) {
-          reflectionsById.set(reflection.id, reflection);
+          reflectionsById.set(reflection.id, withRecordedAt(reflection, entry));
         }
       }
       continue;
@@ -479,16 +588,26 @@ function foldLedger(entries, options = {}) {
       for (const observationId of entry.data.observationIds) {
         droppedObservationIds.add(observationId);
       }
+      continue;
+    }
+    if (isCustomEntry(entry, OM_REFLECTIONS_RETIRED)) {
+      if (!isReflectionsRetiredData(entry.data)) continue;
+      for (const reflectionId of entry.data.reflectionIds) {
+        retiredReflectionIds.add(reflectionId);
+      }
     }
   }
   const observations = Array.from(observationsById.values());
   const activeObservations = observations.filter((observation) => !droppedObservationIds.has(observation.id));
   const reflections = Array.from(reflectionsById.values());
+  const activeReflections = reflections.filter((reflection) => !retiredReflectionIds.has(reflection.id));
   return {
     observations,
     activeObservations,
     droppedObservationIds,
     reflections,
+    activeReflections,
+    retiredReflectionIds,
     observationsById,
     reflectionsById
   };
@@ -533,6 +652,7 @@ function foldProjection(entries, options) {
   const observationsById = /* @__PURE__ */ new Set();
   const reflectionsById = /* @__PURE__ */ new Set();
   const droppedObservationIds = /* @__PURE__ */ new Set();
+  const retiredReflectionIds = /* @__PURE__ */ new Set();
   for (const entry of entries) {
     if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary)) {
       for (const observation of entry.data.observations) {
@@ -546,8 +666,12 @@ function foldProjection(entries, options) {
       for (const reflection of entry.data.reflections) {
         if (reflectionsById.has(reflection.id)) continue;
         reflectionsById.add(reflection.id);
-        reflections.push(reflection);
+        reflections.push(withRecordedAt(reflection, entry));
       }
+      continue;
+    }
+    if (isReflectionsRetiredEntry(entry) && isCoveredAtOrBefore(entry, indexes, reflectionsBoundary)) {
+      for (const reflectionId of entry.data.reflectionIds) retiredReflectionIds.add(reflectionId);
       continue;
     }
     if (isObservationsDroppedEntry(entry) && isCoveredAtOrBefore(entry, indexes, dropsBoundary)) {
@@ -556,7 +680,7 @@ function foldProjection(entries, options) {
   }
   return {
     observations: observations.filter((observation) => !droppedObservationIds.has(observation.id)),
-    reflections
+    reflections: reflections.filter((reflection) => !retiredReflectionIds.has(reflection.id))
   };
 }
 function projectionFromMemoryDetails(details) {
@@ -595,6 +719,8 @@ function latestFullFoldBoundaryId(entries) {
     if (entry.type !== "compaction") continue;
     if (!isMemoryDetails(entry.details)) continue;
     if (!entry.details.fullFold) continue;
+    const foldThroughId = entry.details.foldThroughEntryId;
+    if (foldThroughId && indexes.has(foldThroughId)) return foldThroughId;
     if (!entry.firstKeptEntryId) continue;
     if (!indexes.has(entry.firstKeptEntryId)) continue;
     return entry.firstKeptEntryId;
@@ -620,7 +746,8 @@ function buildCompactionProjection(entries, firstKeptEntryId, config) {
     version: 1,
     fullFold,
     observations: projection.observations,
-    reflections: projection.reflections
+    reflections: projection.reflections,
+    foldThroughEntryId: firstKeptEntryId
   };
   return {
     fullFold,
@@ -633,10 +760,12 @@ function diffProjection(visible, full) {
   const visibleObservationIds = new Set(visible.observations.map((observation) => observation.id));
   const fullObservationIds = new Set(full.observations.map((observation) => observation.id));
   const visibleReflectionIds = new Set(visible.reflections.map((reflection) => reflection.id));
+  const fullReflectionIds = new Set(full.reflections.map((reflection) => reflection.id));
   return {
     observationsOnlyInFull: full.observations.filter((observation) => !visibleObservationIds.has(observation.id)),
     reflectionsOnlyInFull: full.reflections.filter((reflection) => !visibleReflectionIds.has(reflection.id)),
-    droppedOnlyInFull: visible.observations.filter((observation) => !fullObservationIds.has(observation.id))
+    droppedOnlyInFull: visible.observations.filter((observation) => !fullObservationIds.has(observation.id)),
+    retiredOnlyInFull: visible.reflections.filter((reflection) => !fullReflectionIds.has(reflection.id))
   };
 }
 
@@ -780,914 +909,6 @@ function recallMemorySources(entries, memoryId) {
     partial: missingSourceEntryIds.length > 0 || nonSourceEntryIds.length > 0 || uniqueMissingSupportingObservationIds.length > 0
   };
 }
-
-// src/session-ledger/render-summary.ts
-var CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in this session.
-
-- Reflections: stable, long-lived facts about the user, project, decisions, and constraints. New reflection lines may include ids in brackets.
-- Observations: timestamped events from the conversation history, in chronological order. Observation lines include ids in brackets.
-
-Treat these as past records. When entries conflict, the most recent observation reflects the latest known state. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
-
-When exact source context is needed for precision or traceability, use the recall tool with the relevant observation or reflection id. This is especially useful when a reflection materially affects a decision or is too compressed to continue confidently. Do not use recall as broad search or inject raw source unless it is needed.`;
-function observationToSummaryLine(observation) {
-  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] ${observation.content}`;
-}
-function reflectionToSummaryLine(reflection) {
-  return `[${reflection.id}] ${reflection.content}`;
-}
-function renderSummary(reflections, observations) {
-  if (reflections.length === 0 && observations.length === 0) return "";
-  const parts = [CONTEXT_USAGE_INSTRUCTIONS];
-  if (reflections.length > 0) {
-    parts.push(`## Reflections
-${reflections.map(reflectionToSummaryLine).join("\n")}`);
-  }
-  if (observations.length > 0) {
-    parts.push(`## Observations
-${observations.map(observationToSummaryLine).join("\n")}`);
-  }
-  return parts.join("\n\n");
-}
-
-// src/commands/status.ts
-function pct(current, total) {
-  return total > 0 ? Math.round(current / total * 100) : 0;
-}
-function tokenSum(items) {
-  return items.reduce((sum, item) => sum + item.tokenCount, 0);
-}
-function addedSuffix(count) {
-  return count > 0 ? `+${count.toLocaleString()}` : void 0;
-}
-function removedSuffix(count) {
-  return count > 0 ? `-${count.toLocaleString()}` : void 0;
-}
-function appendSuffixes(line, suffixes) {
-  const rendered = suffixes.filter((suffix) => suffix !== void 0);
-  return rendered.length > 0 ? `${line} ${rendered.join(" ")}` : line;
-}
-function registerStatusCommand(pi, runtime) {
-  pi.registerCommand("om:status", {
-    description: "Show observational memory status",
-    handler: async (_args, ctx) => {
-      runtime.ensureConfig(ctx.cwd);
-      const entries = ctx.sessionManager.getBranch();
-      const folded = foldLedger(entries);
-      const visible = visibleProjection(entries);
-      const full = fullProjection(entries);
-      const drift = diffProjection(visible, full);
-      const visibleObservationTokens = tokenSum(visible.observations);
-      const visibleReflectionTokens = tokenSum(visible.reflections);
-      const activeObservationPool = observationPoolMetrics(folded.activeObservations, runtime.config.observationsPoolTargetTokens);
-      const observationLine2 = appendSuffixes(
-        `Observations: ${folded.observations.length} recorded / ${folded.droppedObservationIds.size} dropped / ${folded.activeObservations.length} active / ${visible.observations.length} visible`,
-        [
-          addedSuffix(drift.observationsOnlyInFull.length),
-          removedSuffix(drift.droppedOnlyInFull.length)
-        ]
-      );
-      const reflectionLine2 = appendSuffixes(
-        `Reflections:  ${folded.reflections.length} recorded / ${visible.reflections.length} visible`,
-        [addedSuffix(drift.reflectionsOnlyInFull.length)]
-      );
-      const obsProgress = rawTokensSinceObservationCoverage(entries);
-      const reflectionProgress = rawTokensSinceReflectionCoverage(entries);
-      const compactionProgress = rawTokensSinceLastCompaction(entries);
-      const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
-      const compactThreshold = resolveCompactAfterTokens(runtime.config, contextWindow);
-      const passiveLines = runtime.config.passive === true ? [
-        "\u2500\u2500 Mode \u2500\u2500",
-        "Passive: automatic memory workers and auto-compaction disabled; manual/Pi compaction, commands, and recall remain active",
-        ""
-      ] : [];
-      const lines = [
-        ...passiveLines,
-        "\u2500\u2500 Memory \u2500\u2500",
-        observationLine2,
-        reflectionLine2,
-        "",
-        "\u2500\u2500 Activity \u2500\u2500",
-        `Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
-        `Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
-        `Next compaction:  ~${compactionProgress.toLocaleString()} / ${compactThreshold.toLocaleString()} estimated source tokens (${pct(compactionProgress, compactThreshold)}%)`,
-        `Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
-        `Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
-        `Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`
-      ];
-      if (runtime.consolidationInFlight || runtime.compactInFlight || runtime.compactHookInFlight) {
-        lines.push("", "\u2500\u2500 In flight \u2500\u2500");
-        if (runtime.consolidationInFlight) {
-          const phase = runtime.consolidationPhase ? ` (${runtime.consolidationPhase})` : "";
-          lines.push(`Consolidation: running${phase}`);
-        }
-        if (runtime.compactInFlight) lines.push("Auto-compaction: running");
-        if (runtime.compactHookInFlight) lines.push("Compaction hook: running");
-      }
-      if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastDropperError) {
-        lines.push("", "\u2500\u2500 Last error \u2500\u2500");
-        if (runtime.lastObserverError) lines.push(`Observer: ${runtime.lastObserverError}`);
-        if (runtime.lastReflectorError) lines.push(`Reflector: ${runtime.lastReflectorError}`);
-        if (runtime.lastDropperError) lines.push(`Dropper: ${runtime.lastDropperError}`);
-      }
-      ctx.ui.notify(lines.join("\n"), "info");
-    }
-  });
-}
-
-// src/clipboard.ts
-import { spawn } from "node:child_process";
-function getClipboardCommands(platform = process.platform) {
-  switch (platform) {
-    case "darwin":
-      return [{ command: "pbcopy", args: [] }];
-    case "win32":
-      return [{ command: "clip", args: [] }];
-    default:
-      return [
-        { command: "wl-copy", args: [] },
-        { command: "xclip", args: ["-selection", "clipboard"] },
-        { command: "xsel", args: ["--clipboard", "--input"] },
-        { command: "termux-clipboard-set", args: [] }
-      ];
-  }
-}
-async function copyTextToClipboard(text, runner = runClipboardCommand, commands = getClipboardCommands()) {
-  for (const command of commands) {
-    if (await runner(command, text)) return true;
-  }
-  return false;
-}
-function runClipboardCommand(command, text) {
-  return new Promise((resolve) => {
-    let settled = false;
-    let timeout;
-    const finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      if (timeout) clearTimeout(timeout);
-      resolve(ok);
-    };
-    const child = spawn(command.command, command.args, {
-      stdio: ["pipe", "ignore", "ignore"]
-    });
-    timeout = setTimeout(() => {
-      child.kill();
-      finish(false);
-    }, 2e3);
-    child.on("error", () => finish(false));
-    child.on("close", (code) => finish(code === 0));
-    child.stdin.on("error", () => void 0);
-    child.stdin.end(text, "utf8");
-  });
-}
-
-// src/commands/view.ts
-function firstArg(args) {
-  if (Array.isArray(args)) return typeof args[0] === "string" ? args[0] : void 0;
-  if (typeof args === "string") return args.trim().split(/\s+/)[0];
-  if (args && typeof args === "object" && "mode" in args) {
-    const mode = args.mode;
-    return typeof mode === "string" ? mode : void 0;
-  }
-  return void 0;
-}
-function renderList(items, render, empty) {
-  return items.length > 0 ? items.map(render).join("\n") : empty;
-}
-function renderContentOnlyProjection(projection, emptyScope) {
-  return [
-    "\u2500\u2500 Reflections \u2500\u2500",
-    renderList(projection.reflections, reflectionToSummaryLine, `No ${emptyScope} reflections.`),
-    "",
-    "\u2500\u2500 Observations \u2500\u2500",
-    renderList(projection.observations, observationToSummaryLine, `No ${emptyScope} observations.`)
-  ].join("\n");
-}
-function registerViewCommand(pi, runtime, options = {}) {
-  const copyToClipboard = options.copyToClipboard ?? copyTextToClipboard;
-  pi.registerCommand("om:view", {
-    description: "Print and copy observational memory content (visible by default, full for recorded memory)",
-    handler: async (args, ctx) => {
-      runtime.ensureConfig(ctx.cwd);
-      const entries = ctx.sessionManager.getBranch();
-      const mode = firstArg(args);
-      const notifyWithCopy = async (output) => {
-        const copied = await copyToClipboard(output).catch(() => false);
-        ctx.ui.notify(
-          copied ? `${output}
-
-Copied /om:view output to clipboard.` : `${output}
-
-Warning: failed to copy /om:view output to clipboard.`,
-          "info"
-        );
-      };
-      if (mode === "full") {
-        await notifyWithCopy(renderContentOnlyProjection(fullProjection(entries), "recorded"));
-        return;
-      }
-      if (mode && mode !== "visible") {
-        ctx.ui.notify("Usage: /om:view [full]", "info");
-        return;
-      }
-      await notifyWithCopy(renderContentOnlyProjection(visibleProjection(entries), "visible"));
-    }
-  });
-}
-
-// src/hooks/compaction-hook.ts
-var DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 2e4;
-function observationsPoolMaxTokens(runtime) {
-  const value = runtime.config.observationsPoolMaxTokens;
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS;
-}
-function registerCompactionHook(pi, runtime) {
-  pi.on("session_before_compact", async (event, ctx) => {
-    if (runtime.compactHookInFlight) {
-      if (ctx.hasUI) {
-        ctx.ui.notify(
-          "Observational memory: another compaction is already in progress; cancelling duplicate",
-          "warning"
-        );
-      }
-      return { cancel: true };
-    }
-    runtime.compactHookInFlight = true;
-    try {
-      runtime.ensureConfig(ctx.cwd);
-      const { preparation, branchEntries } = event;
-      const { firstKeptEntryId, tokensBefore } = preparation;
-      const projection = buildCompactionProjection(
-        branchEntries,
-        firstKeptEntryId,
-        { observationsPoolMaxTokens: observationsPoolMaxTokens(runtime) }
-      );
-      const summary = renderSummary(projection.reflections, projection.observations);
-      if (summary.length === 0) {
-        return;
-      }
-      return {
-        compaction: {
-          summary,
-          firstKeptEntryId,
-          tokensBefore,
-          details: projection.details
-        }
-      };
-    } finally {
-      runtime.compactHookInFlight = false;
-    }
-  });
-}
-
-// src/hooks/compaction-trigger.ts
-function registerCompactionTrigger(pi, runtime) {
-  pi.on("agent_settled", (_event, ctx) => {
-    runtime.ensureConfig(ctx.cwd);
-    if (runtime.config.passive === true) return;
-    if (runtime.compactInFlight) return;
-    const entries = ctx.sessionManager?.getBranch?.();
-    if (!entries) return;
-    const progress = rawTokensSinceLastCompaction(entries);
-    const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
-    const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
-    if (progress < threshold) return;
-    const hasUI = ctx.hasUI;
-    const ui = ctx.ui;
-    if (hasUI) ui?.notify(
-      `Observational memory: compaction threshold reached (~${progress.toLocaleString()} estimated source tokens); triggering compaction`,
-      "info"
-    );
-    runtime.compactInFlight = true;
-    setTimeout(() => {
-      try {
-        if (!ctx.isIdle()) {
-          runtime.compactInFlight = false;
-          if (hasUI) ui?.notify(
-            "Observational memory: compaction deferred \u2014 agent became busy before compaction",
-            "info"
-          );
-          return;
-        }
-        const currentEntries = ctx.sessionManager?.getBranch?.();
-        if (!currentEntries) {
-          runtime.compactInFlight = false;
-          return;
-        }
-        const currentProgress = rawTokensSinceLastCompaction(currentEntries);
-        if (currentProgress < threshold) {
-          runtime.compactInFlight = false;
-          if (hasUI) ui?.notify(
-            "Observational memory: compaction skipped \u2014 another compaction already ran before deferred compaction",
-            "info"
-          );
-          return;
-        }
-        ctx.compact({
-          onComplete: () => {
-            runtime.compactInFlight = false;
-            if (hasUI) ui?.notify("Observational memory: compaction complete", "info");
-          },
-          onError: (error) => {
-            runtime.compactInFlight = false;
-            if (error.message === "Compaction cancelled") {
-              return;
-            }
-            if (hasUI) ui?.notify(`Observational memory: ${error.message}`, "error");
-          }
-        });
-      } catch (error) {
-        runtime.compactInFlight = false;
-        const msg = error instanceof Error ? error.message : String(error);
-        if (hasUI) ui?.notify(`Observational memory: compact threw: ${msg}`, "error");
-      }
-    }, 0);
-  });
-}
-
-// src/agents/dropper/agent.ts
-import { agentLoop } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
-
-// src/debug-log.ts
-import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync as existsSync2, mkdirSync, renameSync, statSync, unlinkSync, appendFileSync } from "node:fs";
-import { dirname, join as join2 } from "node:path";
-import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
-var DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024;
-var DEBUG_LOG_RELATIVE_PATH = join2("observational-memory", "debug.ndjson");
-var DEBUG_LOG_SESSION_DIR_RELATIVE_PATH = join2("observational-memory", "debug");
-var storage = new AsyncLocalStorage();
-function withDebugLogContext(context, fn) {
-  const parent = storage.getStore();
-  return storage.run({ ...parent, ...context }, fn);
-}
-function safeDebugLogSessionId(sessionId) {
-  const trimmed = sessionId?.trim();
-  if (!trimmed) return void 0;
-  const sanitized = trimmed.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 128);
-  if (!/[A-Za-z0-9]/.test(sanitized)) return void 0;
-  return sanitized;
-}
-function debugLogRelativePath(context) {
-  const safeSessionId = safeDebugLogSessionId(context.sessionId);
-  return safeSessionId ? join2(DEBUG_LOG_SESSION_DIR_RELATIVE_PATH, `${safeSessionId}.ndjson`) : DEBUG_LOG_RELATIVE_PATH;
-}
-function debugLog(event, data = {}) {
-  const context = storage.getStore();
-  if (context?.enabled !== true) return;
-  try {
-    const path = join2(getAgentDir2(), debugLogRelativePath(context));
-    mkdirSync(dirname(path), { recursive: true });
-    rotateIfNeeded(path);
-    const payload = {
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      event,
-      cwd: context.cwd,
-      sessionId: context.sessionId,
-      sessionFile: context.sessionFile,
-      runId: context.runId,
-      data
-    };
-    appendFileSync(path, `${JSON.stringify(payload)}
-`, "utf-8");
-  } catch {
-  }
-}
-function rotateIfNeeded(path) {
-  if (!existsSync2(path)) return;
-  if (statSync(path).size < DEBUG_LOG_MAX_BYTES) return;
-  const backupPath = `${path}.1`;
-  if (existsSync2(backupPath)) unlinkSync(backupPath);
-  renameSync(path, backupPath);
-}
-
-// src/model-budget.ts
-var AGENT_LOOP_MAX_TOKENS = 32e3;
-function boundedMaxTokens(model, requested = AGENT_LOOP_MAX_TOKENS) {
-  return typeof model.maxTokens === "number" && model.maxTokens > 0 ? Math.min(model.maxTokens, requested) : requested;
-}
-
-// src/agents/stream-errors.ts
-function logAgentStreamError(stage, event) {
-  if (event.type !== "message_end") return;
-  const message = event.message;
-  if (message.role !== "assistant") return;
-  if (message.stopReason !== "error" && message.stopReason !== "aborted") return;
-  debugLog(`${stage}.stream_error`, {
-    stopReason: message.stopReason,
-    errorMessage: message.errorMessage
-  });
-}
-
-// src/agents/worker-stream.ts
-import { streamSimple as compatStreamSimple } from "@earendil-works/pi-ai/compat";
-function resolveWorkerStreamSimple(model, modelRegistry, override) {
-  if (override) return override;
-  const registryStream = modelRegistry?.streamSimple;
-  if (typeof registryStream === "function") {
-    return (nextModel, context, options) => registryStream.call(modelRegistry, nextModel, context, options);
-  }
-  try {
-    const config = modelRegistry?.getRegisteredProviderConfig?.(model.provider);
-    const composed = config?.streamSimple;
-    if (config?.api === model.api && typeof composed === "function") {
-      return composed;
-    }
-  } catch {
-  }
-  return compatStreamSimple;
-}
-
-// src/agents/dropper/prompts.ts
-var DROPPER_SYSTEM = `You are the dropper agent for a coding assistant.
-
-These records are the ONLY information the assistant will have about past interactions once the raw conversation is compacted out of context. Dropping the wrong observation can make future work repeat, contradict, or misremember the user. Take this seriously.
-
-Your job is to identify only the safest active observations to remove from compacted memory by calling drop_observations with their ids. Default action is KEEP. When uncertain, keep the observation.
-
-Active-memory framing. Dropping an observation removes it from active compacted memory; it does not erase the ledger history or source evidence. Still, future compressed context will no longer show the observation, so only drop it when its durable meaning is safely captured elsewhere or it is genuinely low-signal and carries no unique future value.
-
-The user message includes the active observation pool target and "Maximum drops allowed this run". The maximum is a hard upper bound sized to move the pool toward the target if every proposed drop is clearly safe. It is not a target. Do not try to fill it. Drop fewer or none when fewer observations are safely removable. When the active pool is far over target, make a thorough pass over safe candidates rather than stopping after a few obvious examples.
-
-What to drop, in priority order:
-- Redundant observations whose durable meaning is already captured by current reflections with equivalent fidelity.
-- Superseded observations where a later observation clearly replaces the older state.
-- Repeated routine tool acknowledgements or low-signal progress updates that do not carry decisions, constraints, exact errors, or user-specific facts.
-- Older observations that no longer carry working context and are covered by a reflection or a newer observation.
-
-Age-gradient rule. Recent observations carry working context the assistant may still need; older observations have usually been summarized elsewhere or are no longer load-bearing. Prefer older safe drops before newer working context, but age alone is not enough to drop important or uniquely load-bearing observations.
-
-Reflection coverage guidance. Each observation line includes [coverage: none|partial|strong]. Coverage is evidence, not an automatic decision:
-- none: no current reflection cites this observation id. Be cautious, especially for high or critical observations.
-- partial: one current reflection cites this observation id. Compare the observation to the reflection before dropping.
-- strong: two or more current reflections cite this observation id. This is stronger evidence that the durable meaning is preserved, but you must still keep uniquely load-bearing or uncertain observations.
-
-Relevance guidance. Relevance is importance/resistance, not an absolute keep/drop lock:
-- low: consider first, but drop only when it carries no unique detail, decision, state, error, identifier, or user-specific fact.
-- medium: drop when redundant with reflections or other observations, or when the work state is clearly obsolete.
-- high: drop only when clearly superseded or already captured by a reflection with equivalent fidelity.
-- critical: highest importance and strongest resistance. Do not drop fresh or uniquely load-bearing critical observations. Critical observations may be dropped only with strong semantic evidence such as age plus partial/strong reflection coverage, supersession by newer memory, redundancy, or clear obsolescence.
-
-User assertions and concrete completions must be preserved unless a current reflection or newer observation preserves the exact assertion/completion and its important details with equivalent fidelity.
-
-Preservation floor. Regardless of relevance label, budget pressure, coverage, or age, do not drop observations that uniquely carry any of the following:
-- User preferences, constraints, corrections, or identity/role facts.
-- Concrete completions that future runs must not redo.
-- Named identifiers, file paths, function names, package names, tickets, commit SHAs, handles, or exact commands.
-- Exact error messages, diagnostic output, or test failure names.
-- Architectural or technical decisions and their rationale.
-- Dates of specific events, deadlines, meetings, migrations, or incidents.
-- Current unresolved blockers, TODOs, partial work, or decisions waiting on the user.
-- Non-standard user terminology or unusual phrasing needed for future recognition.
-
-What you cannot do:
-- You cannot merge observations.
-- You cannot rewrite or edit observations.
-- You cannot add new observations or reflections.
-- You can only call drop_observations with ids from the current observations list.
-
-Do not force drops you do not believe in. If no observations are safe to drop, do not call the tool and reply briefly. Hitting the budget or maximum count is less important than preserving load-bearing memory.`;
-
-// src/agents/dropper/coverage.ts
-var REFLECTION_COVERAGE_DROP_RANK = {
-  strong: 0,
-  partial: 1,
-  none: 2
-};
-function reflectionSupportCounts(reflections) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const reflection of reflections) {
-    const uniqueIds = new Set(reflection.supportingObservationIds);
-    for (const id of uniqueIds) counts.set(id, (counts.get(id) ?? 0) + 1);
-  }
-  return counts;
-}
-function reflectionCoverageTierForCount(count) {
-  if (count <= 0) return "none";
-  if (count === 1) return "partial";
-  return "strong";
-}
-function reflectionCoverageMap(observations, reflections) {
-  const counts = reflectionSupportCounts(reflections);
-  return new Map(observations.map((observation) => [
-    observation.id,
-    reflectionCoverageTierForCount(counts.get(observation.id) ?? 0)
-  ]));
-}
-function emptyCoverageBucket() {
-  return {
-    none: { count: 0, tokens: 0 },
-    partial: { count: 0, tokens: 0 },
-    strong: { count: 0, tokens: 0 }
-  };
-}
-function emptyCoverageSummaryByRelevance() {
-  return {
-    low: emptyCoverageBucket(),
-    medium: emptyCoverageBucket(),
-    high: emptyCoverageBucket(),
-    critical: emptyCoverageBucket()
-  };
-}
-function summarizeCoverageByRelevance(observations, coverageById) {
-  const summary = emptyCoverageSummaryByRelevance();
-  for (const observation of observations) {
-    const tier = coverageById.get(observation.id) ?? "none";
-    const bucket = summary[observation.relevance][tier];
-    bucket.count++;
-    bucket.tokens += observation.tokenCount;
-  }
-  return summary;
-}
-function summarizeCoverageByRelevanceForIds(ids, observations, coverageById) {
-  const byId = new Map(observations.map((observation) => [observation.id, observation]));
-  const selected = ids.flatMap((id) => {
-    const observation = byId.get(id);
-    return observation ? [observation] : [];
-  });
-  return summarizeCoverageByRelevance(selected, coverageById);
-}
-function emptyCoverageTransitionSummaryByRelevance() {
-  return {
-    low: {},
-    medium: {},
-    high: {},
-    critical: {}
-  };
-}
-function summarizeCoverageTransitionsByRelevance(observations, beforeCoverageById, afterCoverageById) {
-  const summary = emptyCoverageTransitionSummaryByRelevance();
-  for (const observation of observations) {
-    const before = beforeCoverageById.get(observation.id) ?? "none";
-    const after = afterCoverageById.get(observation.id) ?? "none";
-    if (before === after) continue;
-    const key = `${before}->${after}`;
-    const bucket = summary[observation.relevance][key] ?? { count: 0, tokens: 0 };
-    bucket.count++;
-    bucket.tokens += observation.tokenCount;
-    summary[observation.relevance][key] = bucket;
-  }
-  return summary;
-}
-function observationToDropperLine(observation, coverage) {
-  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] [coverage: ${coverage}] ${observation.content}`;
-}
-function coverageTierForObservation(observation, coverageById) {
-  return coverageById.get(observation.id) ?? "none";
-}
-
-// src/agents/dropper/agent.ts
-var DropperStreamError = class extends Error {
-  stopReason;
-  constructor(stopReason, errorMessage) {
-    super(`dropper stream ended with stopReason "${stopReason}"${errorMessage ? `: ${errorMessage}` : ""}`);
-    this.name = "DropperStreamError";
-    this.stopReason = stopReason;
-  }
-};
-var RELEVANCE_DROP_RANK = {
-  low: 0,
-  medium: 1,
-  high: 2,
-  critical: 3
-};
-var DropObservationsSchema = Type.Object({
-  ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
-  reason: Type.Optional(Type.String())
-});
-function joinOrEmpty(items) {
-  return items.length ? items.join("\n") : "(none yet)";
-}
-function relevanceCounts(observations) {
-  return observations.reduce((counts, observation) => {
-    counts[observation.relevance]++;
-    return counts;
-  }, { low: 0, medium: 0, high: 0, critical: 0 });
-}
-function timestampRank(timestamp) {
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
-}
-function selectDropCandidates(ids, observations, maxDrops, reflections = []) {
-  if (maxDrops <= 0 || ids.length === 0) return [];
-  const byId = new Map(observations.map((observation) => [observation.id, observation]));
-  const coverageById = reflectionCoverageMap(observations, reflections);
-  const firstProposalIndex = /* @__PURE__ */ new Map();
-  for (let i = 0; i < ids.length; i++) {
-    const id = ids[i];
-    if (!firstProposalIndex.has(id)) firstProposalIndex.set(id, i);
-  }
-  return Array.from(firstProposalIndex.entries()).map(([id, index]) => ({ id, index, observation: byId.get(id) })).filter(
-    (candidate) => candidate.observation !== void 0
-  ).sort((a, b) => {
-    const coverageDelta = REFLECTION_COVERAGE_DROP_RANK[coverageTierForObservation(a.observation, coverageById)] - REFLECTION_COVERAGE_DROP_RANK[coverageTierForObservation(b.observation, coverageById)];
-    const relevanceDelta = RELEVANCE_DROP_RANK[a.observation.relevance] - RELEVANCE_DROP_RANK[b.observation.relevance];
-    const ageDelta = timestampRank(a.observation.timestamp) - timestampRank(b.observation.timestamp);
-    return coverageDelta || relevanceDelta || ageDelta || a.index - b.index;
-  }).slice(0, maxDrops).map((candidate) => candidate.id);
-}
-async function runDropper(args) {
-  const { model, apiKey, headers, env, reflections, observations, targetTokens, signal } = args;
-  if (observations.length === 0) return void 0;
-  const metrics = observationPoolMetrics(observations, targetTokens);
-  const { observationTokens, fullness, tokensOverTarget, maxDropsAllowed } = metrics;
-  const coverageById = reflectionCoverageMap(observations, reflections);
-  const coverageSummaryByRelevance = summarizeCoverageByRelevance(observations, coverageById);
-  debugLog("dropper.agent_start", {
-    activeObservationCount: observations.length,
-    reflectionCount: reflections.length,
-    observationTokens,
-    targetTokens,
-    tokensOverTarget,
-    fullness,
-    maxDropsAllowed,
-    relevanceCounts: relevanceCounts(observations),
-    coverageSummaryByRelevance
-  });
-  if (maxDropsAllowed <= 0) {
-    debugLog("dropper.result", {
-      reason: "not_over_target",
-      toolCallCount: 0,
-      rawRequestedIdsCount: 0,
-      acceptedCandidateCount: 0,
-      selectedDropsCount: 0,
-      selectedDropTokens: 0,
-      selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds([], observations, coverageById),
-      maxDropsAllowed
-    });
-    return void 0;
-  }
-  const proposedDropIds = [];
-  const proposed = /* @__PURE__ */ new Set();
-  const allowed = new Map(observations.map((observation) => [observation.id, observation]));
-  let toolCallCount = 0;
-  let rawRequestedIdsCount = 0;
-  let missingIdsCount = 0;
-  let criticalCandidateIdsCount = 0;
-  let duplicateInRequestCount = 0;
-  let duplicateInRunCount = 0;
-  const dropObservations = {
-    name: "drop_observations",
-    label: "Drop observations",
-    description: "Propose active observation ids that are safe to remove from compacted memory.",
-    parameters: DropObservationsSchema,
-    execute: async (_id, params) => {
-      toolCallCount++;
-      rawRequestedIdsCount += params.ids.length;
-      const seenInRequest = /* @__PURE__ */ new Set();
-      let added = 0;
-      let requestMissingIds = 0;
-      let requestCriticalCandidateIds = 0;
-      let requestDuplicateIds = 0;
-      let requestDuplicateInRunIds = 0;
-      for (const id of params.ids) {
-        const observation = allowed.get(id);
-        if (!observation) {
-          missingIdsCount++;
-          requestMissingIds++;
-          continue;
-        }
-        if (seenInRequest.has(id)) {
-          duplicateInRequestCount++;
-          requestDuplicateIds++;
-          continue;
-        }
-        seenInRequest.add(id);
-        if (proposed.has(id)) {
-          duplicateInRunCount++;
-          requestDuplicateInRunIds++;
-          continue;
-        }
-        proposed.add(id);
-        proposedDropIds.push(id);
-        if (observation.relevance === "critical") {
-          criticalCandidateIdsCount++;
-          requestCriticalCandidateIds++;
-        }
-        added++;
-      }
-      debugLog("dropper.tool_call", {
-        toolCallCount,
-        rawRequestedIdsCount: params.ids.length,
-        acceptedIdsCount: added,
-        missingIdsCount: requestMissingIds,
-        criticalCandidateIdsCount: requestCriticalCandidateIds,
-        duplicateInRequestCount: requestDuplicateIds,
-        duplicateInRunCount: requestDuplicateInRunIds,
-        totalCandidates: proposedDropIds.length,
-        maxDropsAllowed
-      });
-      return {
-        content: [{ type: "text", text: `Queued ${added} drop candidate${added === 1 ? "" : "s"}. Candidates this run: ${proposedDropIds.length}. Maximum drops allowed: ${maxDropsAllowed}.` }],
-        details: { added, totalCandidates: proposedDropIds.length, maxDropsAllowed }
-      };
-    }
-  };
-  const fullnessPercent = Math.round(fullness * 100);
-  const userText = `CURRENT REFLECTIONS:
-${joinOrEmpty(reflections.map(reflectionToSummaryLine))}
-
-CURRENT OBSERVATIONS:
-${joinOrEmpty(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}
-
-Active observation pool: ~${observationTokens.toLocaleString()} tokens; target: ~${targetTokens.toLocaleString()} tokens; fullness against target: ~${fullnessPercent.toLocaleString()}%; over target by ~${tokensOverTarget.toLocaleString()} tokens.
-Maximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"}. This maximum is sized to move the active pool toward the target if every proposed drop is clearly safe.
-This maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
-  const prompts = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
-  const context = {
-    messages: [{ role: "system", content: DROPPER_SYSTEM, timestamp: Date.now() }],
-    tools: [dropObservations]
-  };
-  const reasoning = model.reasoning;
-  const thinkingLevel = args.thinkingLevel ?? "low";
-  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : void 0;
-  let turnCount = 0;
-  const config = {
-    model,
-    apiKey,
-    headers,
-    env,
-    maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
-    convertToLlm: (msgs) => msgs,
-    toolExecution: "sequential",
-    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {},
-    ...effectiveMaxTurns !== void 0 ? {
-      finishTurn: (turn) => {
-        if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return;
-        return ++turnCount >= effectiveMaxTurns ? { action: "end" } : void 0;
-      }
-    } : {}
-  };
-  const loop = args.agentLoop ?? agentLoop;
-  const stream = loop(
-    prompts,
-    context,
-    config,
-    signal,
-    resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
-  );
-  let streamError;
-  for await (const event of stream) {
-    logAgentStreamError("dropper", event);
-    const message = event.message;
-    if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
-      streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
-    }
-  }
-  await stream.result();
-  const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
-  if (droppedIds.length === 0 && streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
-  const reason = droppedIds.length > 0 ? "selected_nonempty" : toolCallCount === 0 ? "no_tool_call" : proposedDropIds.length === 0 ? "all_filtered" : "selected_empty";
-  const selectedDropTokens = droppedIds.reduce((sum, id) => sum + (allowed.get(id)?.tokenCount ?? 0), 0);
-  debugLog("dropper.result", {
-    reason,
-    toolCallCount,
-    rawRequestedIdsCount,
-    missingIdsCount,
-    criticalCandidateIdsCount,
-    duplicateInRequestCount,
-    duplicateInRunCount,
-    acceptedCandidateCount: proposedDropIds.length,
-    selectedDropsCount: droppedIds.length,
-    selectedDropTokens,
-    selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds(droppedIds, observations, coverageById),
-    maxDropsAllowed
-  });
-  return droppedIds.length > 0 ? droppedIds : void 0;
-}
-
-// src/agents/observer/agent.ts
-import { agentLoop as agentLoop2 } from "@earendil-works/pi-agent-core";
-import { Type as Type2 } from "@earendil-works/pi-ai";
-
-// src/ids.ts
-import { createHash } from "node:crypto";
-function hashId(content) {
-  return createHash("sha256").update(content).digest("hex").slice(0, 12);
-}
-
-// src/agents/observer/prompts.ts
-var OBSERVER_SYSTEM = `You are the observation agent for a coding assistant.
-
-These records are the ONLY information the assistant will have about past interactions once the raw conversation is compacted out of context. Anything you do not capture here will be forgotten. Anything you distort here will be remembered wrong. Take this seriously.
-
-Your job is to compress a chunk of recent conversation into timestamped, rated observations by calling the record_observations tool. The observations you emit \u2014 together with the reflections crystallized from them \u2014 are the assistant's ONLY memory of this session after the raw conversation falls out of context.
-
-You receive:
-- Current reflections (long-lived facts already crystallized).
-- Current observations (already-recorded observations, each shown as "[id] YYYY-MM-DD HH:MM [relevance] content").
-- A new chunk of conversation with source entry labels and inline message timestamps. Each source block starts with "[Source entry id: <id>]" followed by content formatted as "[User @ YYYY-MM-DD HH:MM]:", "[Assistant @ ...]:", "[Tool result for <name> @ ...]:", custom messages, or branch summaries.
-- A current local time fallback for observations that have no obvious message timestamp.
-
-How you work:
-1. Read reflections and current observations so you know what is already captured.
-2. Read the conversation chunk and identify what new information it contains.
-3. Call record_observations with a batch covering part (or all) of the chunk.
-4. Read the progress receipt. If content remains uncovered, call again. You may call the tool many times.
-5. When the chunk is fully covered, STOP calling the tool and reply with a brief plain-text confirmation (one short sentence). That ends the run.
-
-What to emit:
-- Produce NEW observations for the new chunk only. Do not restate facts already present in reflections or current observations unless something has materially changed.
-- Use the timestamp from the relevant conversation message. Fall back to current local time ONLY when no message timestamp applies.
-- For every observation, include sourceEntryIds: the smallest exact set of "[Source entry id: ...]" ids that directly support the observation.
-- Never invent source entry ids. Use only ids printed in the chunk. If an observation spans multiple turns or tool results, include every supporting source entry id.
-- Observations with missing, empty, or invalid sourceEntryIds will be rejected and not recorded, so do not call record_observations until you can cite valid source ids.
-- Group repeated similar tool calls into a single observation rather than one per call.
-- Skip routine, low-information events. It is fine to emit zero observations if the chunk carries no new information \u2014 in that case, simply do not call the tool and end with a plain-text confirmation.
-
-Observation content rules:
-
-Format.
-- Single line of plain prose. No markdown, no bullets, no code fences, no XML/HTML tags, no emojis.
-- Do NOT include the timestamp or relevance inside the content string \u2014 those are separate fields.
-- No structured fields embedded in the text (no "key: value" lines, no JSON).
-
-Preserve user assertions exactly.
-When the user TELLS you something about themselves, their project, or their environment, capture it as an assertion. When the user ASKS something, capture it as a question. Assertions are authoritative \u2014 a later question on the same topic does not invalidate them.
-  BAD:  User wondered if they have two kids.
-  GOOD: User stated they have two kids.
-  BAD:  User discussed auth middleware.
-  GOOD: User asked how to configure JWT auth middleware.
-Why this matters: if the user says "I use Postgres" and later asks "what db am I on?", downstream agents must treat the assertion as the answer, not the question.
-
-Preserve unusual phrasing.
-When the user uses non-standard terminology, quote their exact words so future runs can recognize the term.
-  BAD:  User exercised yesterday.
-  GOOD: User stated they did a "movement session" (their term) yesterday.
-
-Use precise action verbs. Replace vague verbs with ones that clarify the nature of the action.
-  BAD:  User got a new subscription.
-  GOOD: User subscribed to the Pro plan.
-  BAD:  User stopped getting the newsletter.
-  GOOD: User unsubscribed from the newsletter.
-  BAD:  User got the library.
-  GOOD: User installed the zod package via pnpm.
-
-Frame state changes as supersession so the old state is explicit.
-  BAD:  User prefers React Query now.
-  GOOD: User will use React Query (switching from SWR).
-Why this matters: without supersession framing, the reflector may crystallize both the old and the new as equally valid preferences.
-
-Mark concrete completions explicitly.
-Use "completed:", "resolved:", "confirmed working", or similar phrasing so future runs know not to redo the work.
-  BAD:  Wrote the login handler.
-  GOOD: completed: implemented login handler at src/auth/login.ts; user confirmed tests pass.
-Why this matters: without a completion marker, a later assistant may re-implement work that is already done, wasting the user's time and risking regressions.
-
-Split compound statements into separate observations.
-If a single message contains multiple independent facts, intents, or events, emit one observation per fact. One observation per line is what enables downstream retrieval and dropping to operate at fact granularity.
-  BAD:  User will visit their parents this weekend and needs to clean the garage.
-  GOOD: User will visit their parents this weekend. + User stated they need to clean the garage this weekend.
-  BAD:  User started a new job and is moving to a new apartment next week.
-  GOOD: User started a new job. + User will move to a new apartment next week.
-  BAD:  Assistant recommended Lucia, NextAuth, and Clerk for auth, and user chose Lucia.
-  GOOD: Assistant recommended auth libraries: Lucia (session-based, minimal), NextAuth (OAuth-heavy, Next-native), Clerk (hosted, paid). + User chose Lucia.
-Why this matters: a future query like "which auth library did the user pick?" can match a single-fact observation cleanly; a compound observation hides the decision inside a recommendation list.
-
-Group repeated similar tool calls into a single observation rather than one per call.
-  BAD:  Agent viewed src/auth.ts. Agent viewed src/users.ts. Agent viewed src/routes.ts.
-  GOOD: Agent surveyed auth-related files (src/auth.ts, src/users.ts, src/routes.ts) and located token validation in src/auth.ts:45.
-
-Detail preservation. When an observation references specific things, preserve the distinguishing details so future queries can still find them:
-
-- File/location: full path + line number when relevant (src/auth.ts:45, not "the auth file").
-- Identifiers and names: package names, function names, variable names, handles, ticket ids, commit SHAs, error codes. Keep them verbatim.
-- Error messages: quote verbatim.
-    BAD:  Build failed with a type error.
-    GOOD: Build failed: TS2322: Type 'string | undefined' is not assignable to type 'string' at src/auth.ts:47.
-- Numerical results: exact values, units, and direction.
-    BAD:  Optimization made it faster.
-    GOOD: Optimization reduced p95 latency from 420ms to 180ms (57% faster).
-- Quantities and counts: "3 failing tests (auth.test.ts, users.test.ts, routes.test.ts)" not "some failing tests".
-- Recommendation or decision lists: preserve the distinguishing attribute per item.
-    BAD:  Assistant recommended 3 auth libraries.
-    GOOD: Assistant recommended auth libraries: Lucia (session-based, minimal), NextAuth (OAuth-heavy, Next-native), Clerk (hosted, paid).
-- Role / participation: capture the user's role at an event, not just attendance.
-    BAD:  User worked on the migration.
-    GOOD: User led the migration from MySQL to Postgres.
-
-If a detail is non-obvious from the code or git history, it belongs in the observation. If it is trivially re-derivable, it does not.
-
-Relevance levels (pick one per observation; this field drives future dropping):
-
-- critical: user assertions about identity, role, or persistent preferences; explicit corrections ("no, don't do X"); concrete completions that future runs MUST NOT redo. These are highest-resistance, load-bearing observations and require the strongest evidence before leaving active memory. Why this matters: if a "critical" item is lost, the assistant may redo finished work, contradict a correction, or misrepresent who the user is.
-- high: non-trivial technical decisions, architectural direction, unresolved blockers, key constraints. Worth keeping across many compactions.
-- medium: task-level context that helps within the current work but isn't durable. The default when you are unsure between medium and high.
-- low: routine tool-call acks, repetitive status updates, content trivially re-derivable from recent messages. The dropper will drop these first.
-
-Do NOT default to "critical" or "high". Most observations are medium or low. Reserve "critical" for things that would cause real damage if forgotten.
-
-  BAD:  relevance=critical for "Agent ran tests and they passed."
-  GOOD: relevance=low for "Agent ran tests and they passed." (routine; captured by a completion observation if it matters)
-
-  BAD:  relevance=medium for "User said they are colorblind; red/green indicators do not work for them."
-  GOOD: relevance=critical for "User said they are colorblind; red/green indicators do not work for them." (persistent constraint; forgetting it causes real harm)
-
-Timestamp format: "YYYY-MM-DD HH:MM" (local time, 24-hour, to the minute). This goes in the timestamp field, not the content.
-
-Remember: these observations are the assistant's ONLY memory of this chunk once the raw messages fall out of context. Make them count.`;
 
 // src/serialize.ts
 function pad(n) {
@@ -1885,28 +1106,625 @@ function renderRecallSourceEntries(entries) {
   return entries.map(renderRecallSourceEntry).filter((block) => block !== null && block.trim().length > 0).join("\n\n");
 }
 
+// src/session-ledger/render-summary.ts
+var CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in this session.
+
+- Reflections: stable, long-lived facts about the user, project, decisions, and constraints. Reflection lines show their id and, when known, the time they were recorded.
+- Observations: timestamped events from the conversation history, in chronological order. Observation lines include ids in brackets.
+
+Treat these as past records. When entries conflict, the most recently recorded one, observation or reflection, reflects the latest known state. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
+
+When exact source context is needed for precision or traceability, use the recall tool with the relevant observation or reflection id. This is especially useful when a reflection materially affects a decision or is too compressed to continue confidently. Do not use recall as broad search or inject raw source unless it is needed.`;
+function observationToSummaryLine(observation) {
+  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] ${observation.content}`;
+}
+function reflectionToSummaryLine(reflection) {
+  return reflection.recordedAt ? `[${reflection.id}] ${formatTimestamp(reflection.recordedAt)} ${reflection.content}` : `[${reflection.id}] ${reflection.content}`;
+}
+var SUMMARY_OBSERVATIONS_MIN_SHARE = 0.5;
+function estimateTokens(text) {
+  return Math.ceil(text.length / 4);
+}
+function selectWithinBudget(records, line, budget) {
+  const keptIndexes = [];
+  let tokens = 0;
+  for (let i = records.length - 1; i >= 0; i--) {
+    const cost = estimateTokens(line(records[i])) + 1;
+    if (tokens + cost > budget) continue;
+    tokens += cost;
+    keptIndexes.push(i);
+  }
+  keptIndexes.reverse();
+  return { kept: keptIndexes.map((i) => records[i]), tokens };
+}
+function renderSummaryWithBudget(reflections, observations, options = {}) {
+  if (reflections.length === 0 && observations.length === 0) {
+    return { text: "", reflections: [], observations: [], omittedReflections: 0, omittedObservations: 0 };
+  }
+  let keptReflections = reflections;
+  let keptObservations = observations;
+  const maxTokens = options.maxTokens;
+  if (maxTokens !== void 0 && Number.isFinite(maxTokens) && maxTokens > 0) {
+    const fixed = estimateTokens(CONTEXT_USAGE_INSTRUCTIONS) + estimateTokens("## Reflections\n## Observations\n\n\n\n") + 40;
+    const budget = Math.max(0, maxTokens - fixed);
+    const reserved = selectWithinBudget(observations, observationToSummaryLine, Math.floor(budget * SUMMARY_OBSERVATIONS_MIN_SHARE));
+    const pickedReflections = selectWithinBudget(reflections, reflectionToSummaryLine, budget - reserved.tokens);
+    keptReflections = pickedReflections.kept;
+    keptObservations = selectWithinBudget(observations, observationToSummaryLine, budget - pickedReflections.tokens).kept;
+  }
+  const omittedReflections = reflections.length - keptReflections.length;
+  const omittedObservations = observations.length - keptObservations.length;
+  const parts = [CONTEXT_USAGE_INSTRUCTIONS];
+  if (keptReflections.length > 0) {
+    parts.push(`## Reflections
+${keptReflections.map(reflectionToSummaryLine).join("\n")}`);
+  }
+  if (keptObservations.length > 0) {
+    parts.push(`## Observations
+${keptObservations.map(observationToSummaryLine).join("\n")}`);
+  }
+  if (omittedReflections > 0 || omittedObservations > 0) {
+    const omitted = [];
+    if (omittedReflections > 0) omitted.push(`${omittedReflections} older reflection${omittedReflections === 1 ? "" : "s"}`);
+    if (omittedObservations > 0) omitted.push(`${omittedObservations} older observation${omittedObservations === 1 ? "" : "s"}`);
+    parts.push(`(${omitted.join(" and ")} omitted to fit the summary budget; they remain in the session memory ledger, see /om:view full.)`);
+  }
+  return {
+    text: parts.join("\n\n"),
+    reflections: keptReflections,
+    observations: keptObservations,
+    omittedReflections,
+    omittedObservations
+  };
+}
+
+// src/session-ledger/worker-memory.ts
+function lineTokens(line) {
+  return Math.ceil(line.length / 4) + 1;
+}
+function pick(records, line, budget, from) {
+  const indexes = [];
+  let tokens = 0;
+  const order = from === "newest" ? records.map((_, i) => records.length - 1 - i) : records.map((_, i) => i);
+  for (const i of order) {
+    const cost = lineTokens(line(records[i]));
+    if (tokens + cost > budget) continue;
+    tokens += cost;
+    indexes.push(i);
+  }
+  indexes.sort((a, b) => a - b);
+  return { kept: indexes.map((i) => records[i]), tokens };
+}
+function boundWorkerMemory(reflections, observations, maxTokens, options = {}) {
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) {
+    return { reflections, observations, omittedReflections: 0, omittedObservations: 0 };
+  }
+  const from = options.observationsFrom ?? "newest";
+  const reserved = pick(observations, observationToSummaryLine, Math.floor(maxTokens / 2), from);
+  const keptReflections = pick(reflections, reflectionToSummaryLine, maxTokens - reserved.tokens, "newest");
+  const keptObservations = pick(observations, observationToSummaryLine, maxTokens - keptReflections.tokens, from);
+  return {
+    reflections: keptReflections.kept,
+    observations: keptObservations.kept,
+    omittedReflections: reflections.length - keptReflections.kept.length,
+    omittedObservations: observations.length - keptObservations.kept.length
+  };
+}
+
+// src/hooks/compaction-trigger.ts
+function compactionProgress(runtime, entries) {
+  return runtime.config.piAutoCompactionEnabled === false ? rawTokensSinceLastCompaction(entries) : observedTokensSinceLastCompaction(entries);
+}
+function progressLabel(runtime) {
+  return runtime.config.piAutoCompactionEnabled === false ? "estimated" : "observed";
+}
+function registerCompactionTrigger(pi, runtime) {
+  pi.on("agent_settled", (_event, ctx) => maybeTriggerCompaction(runtime, ctx));
+}
+function maybeTriggerCompaction(runtime, ctx) {
+  {
+    runtime.ensureConfig(ctx.cwd);
+    if (runtime.config.passive === true) return;
+    if (runtime.compactInFlight) return;
+    const entries = ctx.sessionManager?.getBranch?.();
+    if (!entries) return;
+    const progress = compactionProgress(runtime, entries);
+    const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
+    const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
+    if (progress < threshold) return;
+    const hasUI = ctx.hasUI;
+    const ui = ctx.ui;
+    if (hasUI) ui?.notify(
+      `Observational memory: compaction threshold reached (~${progress.toLocaleString()} ${progressLabel(runtime)} source tokens); triggering compaction`,
+      "info"
+    );
+    runtime.compactInFlight = true;
+    setTimeout(() => {
+      try {
+        if (!ctx.isIdle()) {
+          runtime.compactInFlight = false;
+          if (hasUI) ui?.notify(
+            "Observational memory: compaction deferred \u2014 agent became busy before compaction",
+            "info"
+          );
+          return;
+        }
+        const currentEntries = ctx.sessionManager?.getBranch?.();
+        if (!currentEntries) {
+          runtime.compactInFlight = false;
+          return;
+        }
+        const currentProgress = compactionProgress(runtime, currentEntries);
+        if (currentProgress < threshold) {
+          runtime.compactInFlight = false;
+          if (hasUI) ui?.notify(
+            "Observational memory: compaction skipped \u2014 another compaction already ran before deferred compaction",
+            "info"
+          );
+          return;
+        }
+        ctx.compact({
+          onComplete: () => {
+            runtime.compactInFlight = false;
+            if (hasUI) ui?.notify("Observational memory: compaction complete", "info");
+          },
+          onError: (error) => {
+            runtime.compactInFlight = false;
+            if (error.message === "Compaction cancelled") {
+              return;
+            }
+            if (hasUI) ui?.notify(`Observational memory: ${error.message}`, "error");
+          }
+        });
+      } catch (error) {
+        runtime.compactInFlight = false;
+        const msg = error instanceof Error ? error.message : String(error);
+        if (hasUI) ui?.notify(`Observational memory: compact threw: ${msg}`, "error");
+      }
+    }, 0);
+  }
+}
+
+// src/commands/status.ts
+function pct(current, total) {
+  return total > 0 ? Math.round(current / total * 100) : 0;
+}
+function tokenSum(items) {
+  return items.reduce((sum, item) => sum + item.tokenCount, 0);
+}
+function addedSuffix(count) {
+  return count > 0 ? `+${count.toLocaleString()}` : void 0;
+}
+function removedSuffix(count) {
+  return count > 0 ? `-${count.toLocaleString()}` : void 0;
+}
+function appendSuffixes(line, suffixes) {
+  const rendered = suffixes.filter((suffix) => suffix !== void 0);
+  return rendered.length > 0 ? `${line} ${rendered.join(" ")}` : line;
+}
+function registerStatusCommand(pi, runtime) {
+  pi.registerCommand("om:status", {
+    description: "Show observational memory status",
+    handler: async (_args, ctx) => {
+      runtime.ensureConfig(ctx.cwd);
+      const entries = ctx.sessionManager.getBranch();
+      const folded = foldLedger(entries);
+      const visible = visibleProjection(entries);
+      const full = fullProjection(entries);
+      const drift = diffProjection(visible, full);
+      const visibleObservationTokens = tokenSum(visible.observations);
+      const visibleReflectionTokens = tokenSum(visible.reflections);
+      const activeObservationPool = observationPoolMetrics(folded.activeObservations, runtime.config.observationsPoolTargetTokens);
+      const observationLine2 = appendSuffixes(
+        `Observations: ${folded.observations.length} recorded / ${folded.droppedObservationIds.size} dropped / ${folded.activeObservations.length} active / ${visible.observations.length} visible`,
+        [
+          addedSuffix(drift.observationsOnlyInFull.length),
+          removedSuffix(drift.droppedOnlyInFull.length)
+        ]
+      );
+      const reflectionLine2 = appendSuffixes(
+        `Reflections:  ${folded.reflections.length} recorded / ${folded.retiredReflectionIds.size} retired / ${folded.activeReflections.length} active / ${visible.reflections.length} visible`,
+        [
+          addedSuffix(drift.reflectionsOnlyInFull.length),
+          removedSuffix(drift.retiredOnlyInFull.length)
+        ]
+      );
+      const obsProgress = rawTokensSinceObservationCoverage(entries);
+      const reflectionProgress = observedTokensSinceReflectionCoverage(entries);
+      const compactionProgress2 = compactionProgress(runtime, entries);
+      const unobservedSinceCompaction = Math.max(0, rawTokensSinceLastCompaction(entries) - observedTokensSinceLastCompaction(entries));
+      const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
+      const compactThreshold = resolveCompactAfterTokens(runtime.config, contextWindow);
+      const passiveLines = runtime.config.passive === true ? [
+        "\u2500\u2500 Mode \u2500\u2500",
+        "Passive: automatic memory workers and auto-compaction disabled; manual/Pi compaction, commands, and recall remain active",
+        ""
+      ] : [];
+      const lines = [
+        ...passiveLines,
+        "\u2500\u2500 Memory \u2500\u2500",
+        observationLine2,
+        reflectionLine2,
+        "",
+        "\u2500\u2500 Activity \u2500\u2500",
+        `Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
+        `Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} observed tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
+        `Next compaction:  ~${compactionProgress2.toLocaleString()} / ${compactThreshold.toLocaleString()} ${progressLabel(runtime)} source tokens (${pct(compactionProgress2, compactThreshold)}%)`,
+        `Observer backlog: ~${unobservedSinceCompaction.toLocaleString()} unobserved source tokens since the compaction boundary`,
+        `Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
+        `Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
+        `Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`
+      ];
+      if (runtime.consolidationInFlight || runtime.compactInFlight || runtime.compactHookInFlight) {
+        lines.push("", "\u2500\u2500 In flight \u2500\u2500");
+        if (runtime.consolidationInFlight) {
+          const phase = runtime.consolidationPhase ? ` (${runtime.consolidationPhase})` : "";
+          lines.push(`Consolidation: running${phase}`);
+        }
+        if (runtime.compactInFlight) lines.push("Auto-compaction: running");
+        if (runtime.compactHookInFlight) lines.push("Compaction hook: running");
+      }
+      if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastDropperError || runtime.lastRetirerError) {
+        lines.push("", "\u2500\u2500 Last error \u2500\u2500");
+        if (runtime.lastObserverError) lines.push(`Observer: ${runtime.lastObserverError}`);
+        if (runtime.lastReflectorError) lines.push(`Reflector: ${runtime.lastReflectorError}`);
+        if (runtime.lastDropperError) lines.push(`Dropper: ${runtime.lastDropperError}`);
+        if (runtime.lastRetirerError) lines.push(`Retirer: ${runtime.lastRetirerError}`);
+      }
+      ctx.ui.notify(lines.join("\n"), "info");
+    }
+  });
+}
+
+// src/clipboard.ts
+import { spawn } from "node:child_process";
+function getClipboardCommands(platform = process.platform) {
+  switch (platform) {
+    case "darwin":
+      return [{ command: "pbcopy", args: [] }];
+    case "win32":
+      return [{ command: "clip", args: [] }];
+    default:
+      return [
+        { command: "wl-copy", args: [] },
+        { command: "xclip", args: ["-selection", "clipboard"] },
+        { command: "xsel", args: ["--clipboard", "--input"] },
+        { command: "termux-clipboard-set", args: [] }
+      ];
+  }
+}
+async function copyTextToClipboard(text, runner = runClipboardCommand, commands = getClipboardCommands()) {
+  for (const command of commands) {
+    if (await runner(command, text)) return true;
+  }
+  return false;
+}
+function runClipboardCommand(command, text) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeout;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      resolve(ok);
+    };
+    const child = spawn(command.command, command.args, {
+      stdio: ["pipe", "ignore", "ignore"]
+    });
+    timeout = setTimeout(() => {
+      child.kill();
+      finish(false);
+    }, 2e3);
+    child.on("error", () => finish(false));
+    child.on("close", (code) => finish(code === 0));
+    child.stdin.on("error", () => void 0);
+    child.stdin.end(text, "utf8");
+  });
+}
+
+// src/commands/view.ts
+function firstArg(args) {
+  if (Array.isArray(args)) return typeof args[0] === "string" ? args[0] : void 0;
+  if (typeof args === "string") return args.trim().split(/\s+/)[0];
+  if (args && typeof args === "object" && "mode" in args) {
+    const mode = args.mode;
+    return typeof mode === "string" ? mode : void 0;
+  }
+  return void 0;
+}
+function renderList(items, render, empty) {
+  return items.length > 0 ? items.map(render).join("\n") : empty;
+}
+function renderContentOnlyProjection(projection, emptyScope) {
+  return [
+    "\u2500\u2500 Reflections \u2500\u2500",
+    renderList(projection.reflections, reflectionToSummaryLine, `No ${emptyScope} reflections.`),
+    "",
+    "\u2500\u2500 Observations \u2500\u2500",
+    renderList(projection.observations, observationToSummaryLine, `No ${emptyScope} observations.`)
+  ].join("\n");
+}
+function registerViewCommand(pi, runtime, options = {}) {
+  const copyToClipboard = options.copyToClipboard ?? copyTextToClipboard;
+  pi.registerCommand("om:view", {
+    description: "Print and copy observational memory content (visible by default, full for recorded memory)",
+    handler: async (args, ctx) => {
+      runtime.ensureConfig(ctx.cwd);
+      const entries = ctx.sessionManager.getBranch();
+      const mode = firstArg(args);
+      const notifyWithCopy = async (output) => {
+        const copied = await copyToClipboard(output).catch(() => false);
+        ctx.ui.notify(
+          copied ? `${output}
+
+Copied /om:view output to clipboard.` : `${output}
+
+Warning: failed to copy /om:view output to clipboard.`,
+          "info"
+        );
+      };
+      if (mode === "full") {
+        await notifyWithCopy(renderContentOnlyProjection(fullProjection(entries), "recorded"));
+        return;
+      }
+      if (mode && mode !== "visible") {
+        ctx.ui.notify("Usage: /om:view [full]", "info");
+        return;
+      }
+      await notifyWithCopy(renderContentOnlyProjection(visibleProjection(entries), "visible"));
+    }
+  });
+}
+
+// src/hooks/compaction-hook.ts
+import {
+  sessionEntryToContextMessages
+} from "@earendil-works/pi-coding-agent";
+
+// src/debug-log.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync as existsSync2, mkdirSync, renameSync, statSync, unlinkSync, appendFileSync } from "node:fs";
+import { dirname, join as join2 } from "node:path";
+import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
+var DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024;
+var DEBUG_LOG_RELATIVE_PATH = join2("observational-memory", "debug.ndjson");
+var DEBUG_LOG_SESSION_DIR_RELATIVE_PATH = join2("observational-memory", "debug");
+var storage = new AsyncLocalStorage();
+function withDebugLogContext(context, fn) {
+  const parent = storage.getStore();
+  return storage.run({ ...parent, ...context }, fn);
+}
+function safeDebugLogSessionId(sessionId) {
+  const trimmed = sessionId?.trim();
+  if (!trimmed) return void 0;
+  const sanitized = trimmed.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 128);
+  if (!/[A-Za-z0-9]/.test(sanitized)) return void 0;
+  return sanitized;
+}
+function debugLogRelativePath(context) {
+  const safeSessionId = safeDebugLogSessionId(context.sessionId);
+  return safeSessionId ? join2(DEBUG_LOG_SESSION_DIR_RELATIVE_PATH, `${safeSessionId}.ndjson`) : DEBUG_LOG_RELATIVE_PATH;
+}
+function debugLog(event, data = {}) {
+  const context = storage.getStore();
+  if (context?.enabled !== true) return;
+  try {
+    const path = join2(getAgentDir2(), debugLogRelativePath(context));
+    mkdirSync(dirname(path), { recursive: true });
+    rotateIfNeeded(path);
+    const payload = {
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      event,
+      cwd: context.cwd,
+      sessionId: context.sessionId,
+      sessionFile: context.sessionFile,
+      runId: context.runId,
+      data
+    };
+    appendFileSync(path, `${JSON.stringify(payload)}
+`, "utf-8");
+  } catch {
+  }
+}
+function rotateIfNeeded(path) {
+  if (!existsSync2(path)) return;
+  if (statSync(path).size < DEBUG_LOG_MAX_BYTES) return;
+  const backupPath = `${path}.1`;
+  if (existsSync2(backupPath)) unlinkSync(backupPath);
+  renameSync(path, backupPath);
+}
+
 // src/agents/observer/agent.ts
-var RelevanceSchema = Type2.Union([
-  Type2.Literal("low"),
-  Type2.Literal("medium"),
-  Type2.Literal("high"),
-  Type2.Literal("critical")
+import { agentLoop } from "@earendil-works/pi-agent-core";
+import { Type } from "@earendil-works/pi-ai";
+
+// src/ids.ts
+import { createHash } from "node:crypto";
+function hashId(content) {
+  return createHash("sha256").update(content).digest("hex").slice(0, 12);
+}
+
+// src/agents/stream-errors.ts
+function logAgentStreamError(stage, event) {
+  if (event.type !== "message_end") return;
+  const message = event.message;
+  if (message.role !== "assistant") return;
+  if (message.stopReason !== "error" && message.stopReason !== "aborted") return;
+  debugLog(`${stage}.stream_error`, {
+    stopReason: message.stopReason,
+    errorMessage: message.errorMessage
+  });
+}
+
+// src/agents/worker-stream.ts
+import { streamSimple as compatStreamSimple } from "@earendil-works/pi-ai/compat";
+function resolveWorkerStreamSimple(model, modelRegistry, override) {
+  if (override) return override;
+  const registryStream = modelRegistry?.streamSimple;
+  if (typeof registryStream === "function") {
+    return (nextModel, context, options) => registryStream.call(modelRegistry, nextModel, context, options);
+  }
+  try {
+    const config = modelRegistry?.getRegisteredProviderConfig?.(model.provider);
+    const composed = config?.streamSimple;
+    if (config?.api === model.api && typeof composed === "function") {
+      return composed;
+    }
+  } catch {
+  }
+  return compatStreamSimple;
+}
+
+// src/model-budget.ts
+var AGENT_LOOP_MAX_TOKENS = 32e3;
+function boundedMaxTokens(model, requested = AGENT_LOOP_MAX_TOKENS) {
+  return typeof model.maxTokens === "number" && model.maxTokens > 0 ? Math.min(model.maxTokens, requested) : requested;
+}
+
+// src/agents/observer/prompts.ts
+var OBSERVER_SYSTEM = `You are the observation agent for a coding assistant.
+
+These records are the ONLY information the assistant will have about past interactions once the raw conversation is compacted out of context. Anything you do not capture here will be forgotten. Anything you distort here will be remembered wrong. Take this seriously.
+
+Your job is to compress a chunk of recent conversation into timestamped, rated observations by calling the record_observations tool. The observations you emit \u2014 together with the reflections crystallized from them \u2014 are the assistant's ONLY memory of this session after the raw conversation falls out of context.
+
+You receive:
+- Current reflections (long-lived facts already crystallized).
+- Current observations (already-recorded observations, each shown as "[id] YYYY-MM-DD HH:MM [relevance] content").
+- A new chunk of conversation with source entry labels and inline message timestamps. Each source block starts with "[Source entry id: <id>]" followed by content formatted as "[User @ YYYY-MM-DD HH:MM]:", "[Assistant @ ...]:", "[Tool result for <name> @ ...]:", custom messages, or branch summaries.
+- A current local time fallback for observations that have no obvious message timestamp.
+
+How you work:
+1. Read reflections and current observations so you know what is already captured.
+2. Read the conversation chunk and identify what new information it contains.
+3. Call record_observations with a batch covering part (or all) of the chunk.
+4. Read the progress receipt. If content remains uncovered, call again. You may call the tool many times.
+5. When the chunk is fully covered, STOP calling the tool and reply with a brief plain-text confirmation (one short sentence). That ends the run.
+
+What to emit:
+- Produce NEW observations for the new chunk only. Do not restate facts already present in reflections or current observations unless something has materially changed.
+- Use the timestamp from the relevant conversation message. Fall back to current local time ONLY when no message timestamp applies.
+- For every observation, include sourceEntryIds: the smallest exact set of "[Source entry id: ...]" ids that directly support the observation.
+- Never invent source entry ids. Use only ids printed in the chunk. If an observation spans multiple turns or tool results, include every supporting source entry id.
+- Observations with missing, empty, or invalid sourceEntryIds will be rejected and not recorded, so do not call record_observations until you can cite valid source ids.
+- Group repeated similar tool calls into a single observation rather than one per call.
+- Skip routine, low-information events. It is fine to emit zero observations if the chunk carries no new information \u2014 in that case, simply do not call the tool and end with a plain-text confirmation.
+
+Observation content rules:
+
+Format.
+- Single line of plain prose. No markdown, no bullets, no code fences, no XML/HTML tags, no emojis.
+- Do NOT include the timestamp or relevance inside the content string \u2014 those are separate fields.
+- No structured fields embedded in the text (no "key: value" lines, no JSON).
+
+Preserve user assertions exactly.
+When the user TELLS you something about themselves, their project, or their environment, capture it as an assertion. When the user ASKS something, capture it as a question. Assertions are authoritative \u2014 a later question on the same topic does not invalidate them.
+  BAD:  User wondered if they have two kids.
+  GOOD: User stated they have two kids.
+  BAD:  User discussed auth middleware.
+  GOOD: User asked how to configure JWT auth middleware.
+Why this matters: if the user says "I use Postgres" and later asks "what db am I on?", downstream agents must treat the assertion as the answer, not the question.
+
+Preserve unusual phrasing.
+When the user uses non-standard terminology, quote their exact words so future runs can recognize the term.
+  BAD:  User exercised yesterday.
+  GOOD: User stated they did a "movement session" (their term) yesterday.
+
+Use precise action verbs. Replace vague verbs with ones that clarify the nature of the action.
+  BAD:  User got a new subscription.
+  GOOD: User subscribed to the Pro plan.
+  BAD:  User stopped getting the newsletter.
+  GOOD: User unsubscribed from the newsletter.
+  BAD:  User got the library.
+  GOOD: User installed the zod package via pnpm.
+
+Frame state changes as supersession so the old state is explicit.
+  BAD:  User prefers React Query now.
+  GOOD: User will use React Query (switching from SWR).
+Why this matters: without supersession framing, the reflector may crystallize both the old and the new as equally valid preferences.
+
+Mark concrete completions explicitly.
+Use "completed:", "resolved:", "confirmed working", or similar phrasing so future runs know not to redo the work.
+  BAD:  Wrote the login handler.
+  GOOD: completed: implemented login handler at src/auth/login.ts; user confirmed tests pass.
+Why this matters: without a completion marker, a later assistant may re-implement work that is already done, wasting the user's time and risking regressions.
+
+Split compound statements into separate observations.
+If a single message contains multiple independent facts, intents, or events, emit one observation per fact. One observation per line is what enables downstream retrieval and dropping to operate at fact granularity.
+  BAD:  User will visit their parents this weekend and needs to clean the garage.
+  GOOD: User will visit their parents this weekend. + User stated they need to clean the garage this weekend.
+  BAD:  User started a new job and is moving to a new apartment next week.
+  GOOD: User started a new job. + User will move to a new apartment next week.
+  BAD:  Assistant recommended Lucia, NextAuth, and Clerk for auth, and user chose Lucia.
+  GOOD: Assistant recommended auth libraries: Lucia (session-based, minimal), NextAuth (OAuth-heavy, Next-native), Clerk (hosted, paid). + User chose Lucia.
+Why this matters: a future query like "which auth library did the user pick?" can match a single-fact observation cleanly; a compound observation hides the decision inside a recommendation list.
+
+Group repeated similar tool calls into a single observation rather than one per call.
+  BAD:  Agent viewed src/auth.ts. Agent viewed src/users.ts. Agent viewed src/routes.ts.
+  GOOD: Agent surveyed auth-related files (src/auth.ts, src/users.ts, src/routes.ts) and located token validation in src/auth.ts:45.
+
+Detail preservation. When an observation references specific things, preserve the distinguishing details so future queries can still find them:
+
+- File/location: full path + line number when relevant (src/auth.ts:45, not "the auth file").
+- Identifiers and names: package names, function names, variable names, handles, ticket ids, commit SHAs, error codes. Keep them verbatim.
+- Error messages: quote verbatim.
+    BAD:  Build failed with a type error.
+    GOOD: Build failed: TS2322: Type 'string | undefined' is not assignable to type 'string' at src/auth.ts:47.
+- Numerical results: exact values, units, and direction.
+    BAD:  Optimization made it faster.
+    GOOD: Optimization reduced p95 latency from 420ms to 180ms (57% faster).
+- Quantities and counts: "3 failing tests (auth.test.ts, users.test.ts, routes.test.ts)" not "some failing tests".
+- Recommendation or decision lists: preserve the distinguishing attribute per item.
+    BAD:  Assistant recommended 3 auth libraries.
+    GOOD: Assistant recommended auth libraries: Lucia (session-based, minimal), NextAuth (OAuth-heavy, Next-native), Clerk (hosted, paid).
+- Role / participation: capture the user's role at an event, not just attendance.
+    BAD:  User worked on the migration.
+    GOOD: User led the migration from MySQL to Postgres.
+
+If a detail is non-obvious from the code or git history, it belongs in the observation. If it is trivially re-derivable, it does not.
+
+Relevance levels (pick one per observation; this field drives future dropping):
+
+- critical: user assertions about identity, role, or persistent preferences; explicit corrections ("no, don't do X"); concrete completions that future runs MUST NOT redo. These are highest-resistance, load-bearing observations and require the strongest evidence before leaving active memory. Why this matters: if a "critical" item is lost, the assistant may redo finished work, contradict a correction, or misrepresent who the user is.
+- high: non-trivial technical decisions, architectural direction, unresolved blockers, key constraints. Worth keeping across many compactions.
+- medium: task-level context that helps within the current work but isn't durable. The default when you are unsure between medium and high.
+- low: routine tool-call acks, repetitive status updates, content trivially re-derivable from recent messages. The dropper will drop these first.
+
+Do NOT default to "critical" or "high". Most observations are medium or low. Reserve "critical" for things that would cause real damage if forgotten.
+
+  BAD:  relevance=critical for "Agent ran tests and they passed."
+  GOOD: relevance=low for "Agent ran tests and they passed." (routine; captured by a completion observation if it matters)
+
+  BAD:  relevance=medium for "User said they are colorblind; red/green indicators do not work for them."
+  GOOD: relevance=critical for "User said they are colorblind; red/green indicators do not work for them." (persistent constraint; forgetting it causes real harm)
+
+Timestamp format: "YYYY-MM-DD HH:MM" (local time, 24-hour, to the minute). This goes in the timestamp field, not the content.
+
+Remember: these observations are the assistant's ONLY memory of this chunk once the raw messages fall out of context. Make them count.`;
+
+// src/agents/observer/agent.ts
+var RelevanceSchema = Type.Union([
+  Type.Literal("low"),
+  Type.Literal("medium"),
+  Type.Literal("high"),
+  Type.Literal("critical")
 ]);
 var OBSERVATION_TIMESTAMP_PATTERN = "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$";
-var RecordObservationsSchema = Type2.Object({
-  observations: Type2.Array(
-    Type2.Object({
-      timestamp: Type2.String({
+var RecordObservationsSchema = Type.Object({
+  observations: Type.Array(
+    Type.Object({
+      timestamp: Type.String({
         pattern: OBSERVATION_TIMESTAMP_PATTERN,
         description: "Observation time in local 'YYYY-MM-DD HH:MM' format."
       }),
-      content: Type2.String({
+      content: Type.String({
         minLength: 1,
         description: "Single-line plain prose. No markdown, no tags, no embedded timestamp."
       }),
       relevance: RelevanceSchema,
-      sourceEntryIds: Type2.Array(
-        Type2.String({ minLength: 1 }),
+      sourceEntryIds: Type.Array(
+        Type.String({ minLength: 1 }),
         {
           minItems: 1,
           description: "Exact source entry ids from the chunk that directly support this observation. Use only ids shown in '[Source entry id: ...]' labels; never invent ids."
@@ -1924,7 +1742,7 @@ var ObserverStreamError = class extends Error {
     this.stopReason = stopReason;
   }
 };
-function joinOrEmpty2(items) {
+function joinOrEmpty(items) {
   return items.length ? items.join("\n") : "(none yet)";
 }
 function normalizeSourceEntryIds(sourceEntryIds, allowedSourceEntryIds) {
@@ -1989,10 +1807,10 @@ async function runObserver(args) {
   const userText = `Current local time: ${now}
 
 CURRENT REFLECTIONS:
-${joinOrEmpty2(priorReflections)}
+${joinOrEmpty(priorReflections)}
 
 CURRENT OBSERVATIONS:
-${joinOrEmpty2(priorObservations)}
+${joinOrEmpty(priorObservations)}
 
 Compress the following new conversation chunk into observations by calling record_observations one or more times. Do not restate facts already present in current reflections or current observations. Prefer inline conversation timestamps when assigning times; fall back to the current local time above only if no message timestamp applies. Stop calling the tool and reply with a short plain-text confirmation once the chunk is fully covered.
 
@@ -2030,7 +1848,7 @@ ${conversation}`;
       }
     } : {}
   };
-  const loop = args.agentLoop ?? agentLoop2;
+  const loop = args.agentLoop ?? agentLoop;
   const stream = loop(
     prompts,
     context,
@@ -2052,6 +1870,638 @@ ${conversation}`;
     return void 0;
   }
   return Array.from(accumulated.values());
+}
+
+// src/hooks/compaction-catch-up.ts
+async function catchUpObserver(args) {
+  const { pi, runtime, ctx, entries, gap, maxChunks, signal } = args;
+  const result = { chunksRecorded: 0 };
+  if (maxChunks <= 0) return result;
+  const resolved = await runtime.resolveModel({
+    model: ctx.model,
+    modelRegistry: ctx.modelRegistry,
+    hasUI: ctx.hasUI,
+    ui: ctx.ui
+  });
+  if (!resolved.ok) {
+    debugLog("compaction.catch_up.model_unavailable", { reason: resolved.reason });
+    return { ...result, stoppedBecause: "model_unavailable" };
+  }
+  const contextWindow = resolved.model.contextWindow;
+  const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
+  const frontierIndex = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+  let remaining = entries.slice(frontierIndex + 1, gap.lastIndex + 1).filter(isSourceEntry);
+  let branch = entries;
+  for (let chunkIndex = 0; chunkIndex < maxChunks && remaining.length > 0; chunkIndex++) {
+    if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
+    const { text: chunk, sourceEntryIds, estimatedTokens } = serializeSourceAddressedBranchEntries(remaining, { maxTokens: maxChunkTokens });
+    const coversUpToId = sourceEntryIds.at(-1);
+    if (!chunk.trim() || !coversUpToId) break;
+    const fullMemory = fullProjection(branch);
+    const memory = boundWorkerMemory(fullMemory.reflections, fullMemory.observations, resolveWorkerMemoryMaxTokens(runtime.config, contextWindow));
+    if (runtime.config.showWorkerNotifications && ctx.hasUI) {
+      ctx.ui.notify(
+        `Observational memory: observing ${sourceEntryIds.length} unobserved source entr${sourceEntryIds.length === 1 ? "y" : "ies"} (~${estimatedTokens.toLocaleString()} tokens) before compacting`,
+        "info"
+      );
+    }
+    debugLog("compaction.catch_up.chunk", { chunkIndex, sourceEntryCount: sourceEntryIds.length, estimatedTokens, coversUpToId });
+    let observations;
+    try {
+      observations = await runObserver({
+        model: resolved.model,
+        apiKey: resolved.apiKey,
+        headers: resolved.headers,
+        env: resolved.env,
+        priorReflections: memory.reflections.map(reflectionToSummaryLine),
+        priorObservations: memory.observations.map(observationToSummaryLine),
+        chunk,
+        allowedSourceEntryIds: sourceEntryIds,
+        signal,
+        maxTurns: runtime.config.agentMaxTurns,
+        maxOutputTokens: runtime.config.agentMaxTokens,
+        thinkingLevel: runtime.config.model?.thinking ?? "low",
+        modelRegistry: ctx.modelRegistry
+      });
+    } catch (error) {
+      if (signal?.aborted) return { ...result, stoppedBecause: "aborted" };
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      debugLog("compaction.catch_up.error", { chunkIndex, errorMessage });
+      if (ctx.hasUI) ctx.ui.notify(`Observational memory: catch-up observer failed: ${errorMessage}`, "warning");
+      return { ...result, stoppedBecause: "error" };
+    }
+    const data = observations && observations.length > 0 ? buildObservationsRecordedData(observations, coversUpToId) : void 0;
+    if (!data) {
+      debugLog("compaction.catch_up.empty", { chunkIndex, coversUpToId });
+      return { ...result, stoppedBecause: "empty" };
+    }
+    pi.appendEntry(OM_OBSERVATIONS_RECORDED, data);
+    result.chunksRecorded++;
+    debugLog("compaction.catch_up.recorded", { chunkIndex, count: observations.length, coversUpToId });
+    const coveredIndex = entries.findIndex((entry) => entry.id === coversUpToId);
+    remaining = remaining.filter((entry) => entries.indexOf(entry) > coveredIndex);
+    branch = ctx.sessionManager?.getBranch?.() ?? branch;
+  }
+  if (remaining.length > 0 && !result.stoppedBecause) result.stoppedBecause = "max_chunks";
+  return result;
+}
+
+// src/hooks/compaction-hook.ts
+var DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 2e4;
+function observationsPoolMaxTokens(runtime) {
+  const value = runtime.config.observationsPoolMaxTokens;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS;
+}
+var CUT_POINT_ROLES = /* @__PURE__ */ new Set(["user", "assistant", "bashExecution", "custom", "branchSummary", "compactionSummary"]);
+function isCutPointEntry(entry) {
+  if (entry.type === "compaction") return false;
+  try {
+    return sessionEntryToContextMessages(entry).some((message) => CUT_POINT_ROLES.has(message.role));
+  } catch {
+    return false;
+  }
+}
+function findCutPointAtOrBefore(entries, index, startIndex) {
+  for (let i = Math.min(index, entries.length - 1); i >= startIndex && i >= 0; i--) {
+    if (isCutPointEntry(entries[i])) return i;
+  }
+  return -1;
+}
+function resolveCompactionCut(entries, firstKeptEntryId, options) {
+  const cutIndex = entryIndexForId(entries, firstKeptEntryId);
+  if (cutIndex === -1) return { kind: "cut", cut: { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId } };
+  const gap = unobservedSourceSpanBefore(entries, cutIndex);
+  if (!gap) return { kind: "cut", cut: { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId } };
+  if (options.reason === "overflow") return { kind: "delegate", reason: "overflow recovery", gap };
+  const coverageMarkerId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
+  if (!coverageMarkerId) return { kind: "delegate", reason: "no observation coverage", gap };
+  const rangeStart = compactionRangeStartIndex(entries);
+  const coverageIndex2 = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
+  if (coverageIndex2 < rangeStart) return { kind: "delegate", reason: "nothing observed can be compacted", gap };
+  const safeCutIndex = findCutPointAtOrBefore(entries, gap.firstIndex, rangeStart);
+  if (safeCutIndex <= rangeStart) return { kind: "delegate", reason: "nothing observed can be compacted", gap };
+  const freedTokens = rawTokensAfterIndex(entries, rangeStart - 1) - rawTokensAfterIndex(entries, safeCutIndex - 1);
+  if (freedTokens <= 0) return { kind: "delegate", reason: "nothing observed can be compacted", gap };
+  const retainedTokens = rawTokensAfterIndex(entries, safeCutIndex - 1);
+  if (retainedTokens > options.maxRetainedTokens) {
+    return {
+      kind: "delegate",
+      reason: `retaining ~${retainedTokens.toLocaleString()} tokens exceeds the ~${options.maxRetainedTokens.toLocaleString()}-token budget`,
+      gap
+    };
+  }
+  return {
+    kind: "cut",
+    cut: { firstKeptEntryId: entries[safeCutIndex].id, foldThroughEntryId: coverageMarkerId },
+    gap,
+    retainedTokens
+  };
+}
+function gapLabel(gap) {
+  return `${gap.entryCount} source entr${gap.entryCount === 1 ? "y" : "ies"} (~${gap.tokens.toLocaleString()} tokens)`;
+}
+function debugContext(runtime, ctx) {
+  let sessionId;
+  let sessionFile;
+  try {
+    const manager = ctx.sessionManager;
+    sessionId = manager?.getSessionId?.();
+    sessionFile = manager?.getSessionFile?.();
+  } catch {
+  }
+  return {
+    enabled: runtime.config.debugLog === true,
+    cwd: ctx.cwd,
+    sessionId,
+    sessionFile,
+    runId: `compaction-${Date.now().toString(36)}`
+  };
+}
+async function handleCompaction(pi, event, ctx, runtime) {
+  const { preparation, branchEntries } = event;
+  const { firstKeptEntryId, tokensBefore } = preparation;
+  let entries = branchEntries;
+  const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
+  const maxRetainedTokens = resolveCompactionMaxRetainedTokens(runtime.config, contextWindow);
+  const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
+  const reason = event.reason;
+  let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
+  if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !runtime.consolidationInFlight && latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED) !== void 0) {
+    const catchUp = await catchUpObserver({
+      pi,
+      runtime,
+      ctx,
+      entries,
+      gap: resolution.gap,
+      maxChunks: runtime.config.compactionCatchUpMaxChunks,
+      signal: event.signal
+    });
+    debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
+    if (catchUp.chunksRecorded > 0) {
+      entries = ctx.sessionManager?.getBranch?.() ?? entries;
+      resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
+    }
+  }
+  let projection;
+  let summary = "";
+  if (resolution.kind === "cut") {
+    projection = buildCompactionProjection(
+      entries,
+      resolution.cut.foldThroughEntryId,
+      { observationsPoolMaxTokens: observationsPoolMaxTokens(runtime) }
+    );
+    const rendered = renderSummaryWithBudget(projection.reflections, projection.observations, { maxTokens: summaryMaxTokens });
+    summary = rendered.text;
+    const hadRecords = projection.reflections.length + projection.observations.length > 0;
+    if (hadRecords && rendered.reflections.length + rendered.observations.length === 0) {
+      debugLog("compaction.summary_budget_empty", {
+        summaryMaxTokens,
+        reflections: projection.reflections.length,
+        observations: projection.observations.length
+      });
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Observational memory: no memory record fits the ~${summaryMaxTokens.toLocaleString()}-token summary budget; delegating to Pi's native summarizer`,
+          "warning"
+        );
+      }
+      summary = "";
+    }
+    if (resolution.gap && resolution.retainedTokens !== void 0) {
+      const summaryTokens = estimateStringTokens(summary);
+      const afterTokens = resolution.retainedTokens + summaryTokens;
+      if (afterTokens > maxRetainedTokens) {
+        resolution = {
+          kind: "delegate",
+          gap: resolution.gap,
+          reason: `retaining ~${resolution.retainedTokens.toLocaleString()} tokens plus a ~${summaryTokens.toLocaleString()}-token memory summary exceeds the ~${maxRetainedTokens.toLocaleString()}-token budget`
+        };
+      }
+    }
+  }
+  if (resolution.gap) {
+    debugLog("compaction.observer_behind", {
+      proposedFirstKeptEntryId: firstKeptEntryId,
+      unobservedEntries: resolution.gap.entryCount,
+      unobservedTokens: resolution.gap.tokens,
+      outcome: resolution.kind,
+      ...resolution.kind === "cut" ? {
+        firstKeptEntryId: resolution.cut.firstKeptEntryId,
+        foldThroughEntryId: resolution.cut.foldThroughEntryId,
+        retainedTokens: resolution.retainedTokens,
+        summaryTokens: estimateStringTokens(summary),
+        maxRetainedTokens
+      } : { reason: resolution.reason }
+    });
+  }
+  if (resolution.kind === "delegate") {
+    if (ctx.hasUI) {
+      ctx.ui.notify(
+        `Observational memory: observer has not reached ${gapLabel(resolution.gap)} before the compaction cut and they cannot be retained (${resolution.reason}); delegating to Pi's native summarizer`,
+        "warning"
+      );
+    }
+    return void 0;
+  }
+  if (!projection || summary.length === 0) {
+    return void 0;
+  }
+  if (resolution.gap && ctx.hasUI) {
+    ctx.ui.notify(
+      `Observational memory: observer has not reached ${gapLabel(resolution.gap)} before the compaction cut; keeping them in context until they are observed`,
+      "info"
+    );
+  }
+  return {
+    compaction: {
+      summary,
+      firstKeptEntryId: resolution.cut.firstKeptEntryId,
+      tokensBefore,
+      details: projection.details
+    }
+  };
+}
+function registerCompactionHook(pi, runtime) {
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (runtime.compactHookInFlight) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          "Observational memory: another compaction is already in progress; cancelling duplicate",
+          "warning"
+        );
+      }
+      return { cancel: true };
+    }
+    runtime.compactHookInFlight = true;
+    try {
+      runtime.ensureConfig(ctx.cwd);
+      return await withDebugLogContext(debugContext(runtime, ctx), () => handleCompaction(pi, event, ctx, runtime));
+    } finally {
+      runtime.compactHookInFlight = false;
+    }
+  });
+}
+
+// src/agents/dropper/agent.ts
+import { agentLoop as agentLoop2 } from "@earendil-works/pi-agent-core";
+import { Type as Type2 } from "@earendil-works/pi-ai";
+
+// src/agents/dropper/prompts.ts
+var DROPPER_SYSTEM = `You are the dropper agent for a coding assistant.
+
+These records are the ONLY information the assistant will have about past interactions once the raw conversation is compacted out of context. Dropping the wrong observation can make future work repeat, contradict, or misremember the user. Take this seriously.
+
+Your job is to identify only the safest active observations to remove from compacted memory by calling drop_observations with their ids. Default action is KEEP. When uncertain, keep the observation.
+
+Active-memory framing. Dropping an observation removes it from active compacted memory; it does not erase the ledger history or source evidence. Still, future compressed context will no longer show the observation, so only drop it when its durable meaning is safely captured elsewhere or it is genuinely low-signal and carries no unique future value.
+
+The user message includes the active observation pool target and "Maximum drops allowed this run". The maximum is a hard upper bound sized to move the pool toward the target if every proposed drop is clearly safe. It is not a target. Do not try to fill it. Drop fewer or none when fewer observations are safely removable. When the active pool is far over target, make a thorough pass over safe candidates rather than stopping after a few obvious examples.
+
+What to drop, in priority order:
+- Redundant observations whose durable meaning is already captured by current reflections with equivalent fidelity.
+- Superseded observations where a later observation clearly replaces the older state.
+- Repeated routine tool acknowledgements or low-signal progress updates that do not carry decisions, constraints, exact errors, or user-specific facts.
+- Older observations that no longer carry working context and are covered by a reflection or a newer observation.
+
+Age-gradient rule. Recent observations carry working context the assistant may still need; older observations have usually been summarized elsewhere or are no longer load-bearing. Prefer older safe drops before newer working context, but age alone is not enough to drop important or uniquely load-bearing observations.
+
+Reflection coverage guidance. Each observation line includes [coverage: none|partial|strong]. Coverage is evidence, not an automatic decision:
+- none: no current reflection cites this observation id. Be cautious, especially for high or critical observations.
+- partial: one current reflection cites this observation id. Compare the observation to the reflection before dropping.
+- strong: two or more current reflections cite this observation id. This is stronger evidence that the durable meaning is preserved, but you must still keep uniquely load-bearing or uncertain observations.
+
+Relevance guidance. Relevance is importance/resistance, not an absolute keep/drop lock:
+- low: consider first, but drop only when it carries no unique detail, decision, state, error, identifier, or user-specific fact.
+- medium: drop when redundant with reflections or other observations, or when the work state is clearly obsolete.
+- high: drop only when clearly superseded or already captured by a reflection with equivalent fidelity.
+- critical: highest importance and strongest resistance. Do not drop fresh or uniquely load-bearing critical observations. Critical observations may be dropped only with strong semantic evidence such as age plus partial/strong reflection coverage, supersession by newer memory, redundancy, or clear obsolescence.
+
+User assertions and concrete completions must be preserved unless a current reflection or newer observation preserves the exact assertion/completion and its important details with equivalent fidelity.
+
+Preservation floor. Regardless of relevance label, budget pressure, coverage, or age, do not drop observations that uniquely carry any of the following:
+- User preferences, constraints, corrections, or identity/role facts.
+- Concrete completions that future runs must not redo.
+- Named identifiers, file paths, function names, package names, tickets, commit SHAs, handles, or exact commands.
+- Exact error messages, diagnostic output, or test failure names.
+- Architectural or technical decisions and their rationale.
+- Dates of specific events, deadlines, meetings, migrations, or incidents.
+- Current unresolved blockers, TODOs, partial work, or decisions waiting on the user.
+- Non-standard user terminology or unusual phrasing needed for future recognition.
+
+What you cannot do:
+- You cannot merge observations.
+- You cannot rewrite or edit observations.
+- You cannot add new observations or reflections.
+- You can only call drop_observations with ids from the current observations list.
+
+Do not force drops you do not believe in. If no observations are safe to drop, do not call the tool and reply briefly. Hitting the budget or maximum count is less important than preserving load-bearing memory.`;
+
+// src/agents/dropper/coverage.ts
+var REFLECTION_COVERAGE_DROP_RANK = {
+  strong: 0,
+  partial: 1,
+  none: 2
+};
+function reflectionSupportCounts(reflections) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const reflection of reflections) {
+    const uniqueIds = new Set(reflection.supportingObservationIds);
+    for (const id of uniqueIds) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
+}
+function reflectionCoverageTierForCount(count) {
+  if (count <= 0) return "none";
+  if (count === 1) return "partial";
+  return "strong";
+}
+function reflectionCoverageMap(observations, reflections) {
+  const counts = reflectionSupportCounts(reflections);
+  return new Map(observations.map((observation) => [
+    observation.id,
+    reflectionCoverageTierForCount(counts.get(observation.id) ?? 0)
+  ]));
+}
+function emptyCoverageBucket() {
+  return {
+    none: { count: 0, tokens: 0 },
+    partial: { count: 0, tokens: 0 },
+    strong: { count: 0, tokens: 0 }
+  };
+}
+function emptyCoverageSummaryByRelevance() {
+  return {
+    low: emptyCoverageBucket(),
+    medium: emptyCoverageBucket(),
+    high: emptyCoverageBucket(),
+    critical: emptyCoverageBucket()
+  };
+}
+function summarizeCoverageByRelevance(observations, coverageById) {
+  const summary = emptyCoverageSummaryByRelevance();
+  for (const observation of observations) {
+    const tier = coverageById.get(observation.id) ?? "none";
+    const bucket = summary[observation.relevance][tier];
+    bucket.count++;
+    bucket.tokens += observation.tokenCount;
+  }
+  return summary;
+}
+function summarizeCoverageByRelevanceForIds(ids, observations, coverageById) {
+  const byId = new Map(observations.map((observation) => [observation.id, observation]));
+  const selected = ids.flatMap((id) => {
+    const observation = byId.get(id);
+    return observation ? [observation] : [];
+  });
+  return summarizeCoverageByRelevance(selected, coverageById);
+}
+function emptyCoverageTransitionSummaryByRelevance() {
+  return {
+    low: {},
+    medium: {},
+    high: {},
+    critical: {}
+  };
+}
+function summarizeCoverageTransitionsByRelevance(observations, beforeCoverageById, afterCoverageById) {
+  const summary = emptyCoverageTransitionSummaryByRelevance();
+  for (const observation of observations) {
+    const before = beforeCoverageById.get(observation.id) ?? "none";
+    const after = afterCoverageById.get(observation.id) ?? "none";
+    if (before === after) continue;
+    const key = `${before}->${after}`;
+    const bucket = summary[observation.relevance][key] ?? { count: 0, tokens: 0 };
+    bucket.count++;
+    bucket.tokens += observation.tokenCount;
+    summary[observation.relevance][key] = bucket;
+  }
+  return summary;
+}
+function observationToDropperLine(observation, coverage) {
+  return `[${observation.id}] ${observation.timestamp} [${observation.relevance}] [coverage: ${coverage}] ${observation.content}`;
+}
+function coverageTierForObservation(observation, coverageById) {
+  return coverageById.get(observation.id) ?? "none";
+}
+
+// src/agents/dropper/agent.ts
+var DropperStreamError = class extends Error {
+  stopReason;
+  constructor(stopReason, errorMessage) {
+    super(`dropper stream ended with stopReason "${stopReason}"${errorMessage ? `: ${errorMessage}` : ""}`);
+    this.name = "DropperStreamError";
+    this.stopReason = stopReason;
+  }
+};
+var RELEVANCE_DROP_RANK = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3
+};
+var DropObservationsSchema = Type2.Object({
+  ids: Type2.Array(Type2.String({ minLength: 1 }), { minItems: 1 }),
+  reason: Type2.Optional(Type2.String())
+});
+function joinOrEmpty2(items) {
+  return items.length ? items.join("\n") : "(none yet)";
+}
+function relevanceCounts(observations) {
+  return observations.reduce((counts, observation) => {
+    counts[observation.relevance]++;
+    return counts;
+  }, { low: 0, medium: 0, high: 0, critical: 0 });
+}
+function timestampRank(timestamp) {
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+}
+function selectDropCandidates(ids, observations, maxDrops, reflections = []) {
+  if (maxDrops <= 0 || ids.length === 0) return [];
+  const byId = new Map(observations.map((observation) => [observation.id, observation]));
+  const coverageById = reflectionCoverageMap(observations, reflections);
+  const firstProposalIndex = /* @__PURE__ */ new Map();
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    if (!firstProposalIndex.has(id)) firstProposalIndex.set(id, i);
+  }
+  return Array.from(firstProposalIndex.entries()).map(([id, index]) => ({ id, index, observation: byId.get(id) })).filter(
+    (candidate) => candidate.observation !== void 0
+  ).sort((a, b) => {
+    const coverageDelta = REFLECTION_COVERAGE_DROP_RANK[coverageTierForObservation(a.observation, coverageById)] - REFLECTION_COVERAGE_DROP_RANK[coverageTierForObservation(b.observation, coverageById)];
+    const relevanceDelta = RELEVANCE_DROP_RANK[a.observation.relevance] - RELEVANCE_DROP_RANK[b.observation.relevance];
+    const ageDelta = timestampRank(a.observation.timestamp) - timestampRank(b.observation.timestamp);
+    return coverageDelta || relevanceDelta || ageDelta || a.index - b.index;
+  }).slice(0, maxDrops).map((candidate) => candidate.id);
+}
+async function runDropper(args) {
+  const { model, apiKey, headers, env, reflections, observations, targetTokens, signal } = args;
+  if (observations.length === 0) return void 0;
+  const metrics = observationPoolMetrics(observations, targetTokens);
+  const { observationTokens, fullness, tokensOverTarget, maxDropsAllowed } = metrics;
+  const coverageById = reflectionCoverageMap(observations, reflections);
+  const coverageSummaryByRelevance = summarizeCoverageByRelevance(observations, coverageById);
+  debugLog("dropper.agent_start", {
+    activeObservationCount: observations.length,
+    reflectionCount: reflections.length,
+    observationTokens,
+    targetTokens,
+    tokensOverTarget,
+    fullness,
+    maxDropsAllowed,
+    relevanceCounts: relevanceCounts(observations),
+    coverageSummaryByRelevance
+  });
+  if (maxDropsAllowed <= 0) {
+    debugLog("dropper.result", {
+      reason: "not_over_target",
+      toolCallCount: 0,
+      rawRequestedIdsCount: 0,
+      acceptedCandidateCount: 0,
+      selectedDropsCount: 0,
+      selectedDropTokens: 0,
+      selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds([], observations, coverageById),
+      maxDropsAllowed
+    });
+    return void 0;
+  }
+  const proposedDropIds = [];
+  const proposed = /* @__PURE__ */ new Set();
+  const allowed = new Map(observations.map((observation) => [observation.id, observation]));
+  let toolCallCount = 0;
+  let rawRequestedIdsCount = 0;
+  let missingIdsCount = 0;
+  let criticalCandidateIdsCount = 0;
+  let duplicateInRequestCount = 0;
+  let duplicateInRunCount = 0;
+  const dropObservations = {
+    name: "drop_observations",
+    label: "Drop observations",
+    description: "Propose active observation ids that are safe to remove from compacted memory.",
+    parameters: DropObservationsSchema,
+    execute: async (_id, params) => {
+      toolCallCount++;
+      rawRequestedIdsCount += params.ids.length;
+      const seenInRequest = /* @__PURE__ */ new Set();
+      let added = 0;
+      let requestMissingIds = 0;
+      let requestCriticalCandidateIds = 0;
+      let requestDuplicateIds = 0;
+      let requestDuplicateInRunIds = 0;
+      for (const id of params.ids) {
+        const observation = allowed.get(id);
+        if (!observation) {
+          missingIdsCount++;
+          requestMissingIds++;
+          continue;
+        }
+        if (seenInRequest.has(id)) {
+          duplicateInRequestCount++;
+          requestDuplicateIds++;
+          continue;
+        }
+        seenInRequest.add(id);
+        if (proposed.has(id)) {
+          duplicateInRunCount++;
+          requestDuplicateInRunIds++;
+          continue;
+        }
+        proposed.add(id);
+        proposedDropIds.push(id);
+        if (observation.relevance === "critical") {
+          criticalCandidateIdsCount++;
+          requestCriticalCandidateIds++;
+        }
+        added++;
+      }
+      debugLog("dropper.tool_call", {
+        toolCallCount,
+        rawRequestedIdsCount: params.ids.length,
+        acceptedIdsCount: added,
+        missingIdsCount: requestMissingIds,
+        criticalCandidateIdsCount: requestCriticalCandidateIds,
+        duplicateInRequestCount: requestDuplicateIds,
+        duplicateInRunCount: requestDuplicateInRunIds,
+        totalCandidates: proposedDropIds.length,
+        maxDropsAllowed
+      });
+      return {
+        content: [{ type: "text", text: `Queued ${added} drop candidate${added === 1 ? "" : "s"}. Candidates this run: ${proposedDropIds.length}. Maximum drops allowed: ${maxDropsAllowed}.` }],
+        details: { added, totalCandidates: proposedDropIds.length, maxDropsAllowed }
+      };
+    }
+  };
+  const fullnessPercent = Math.round(fullness * 100);
+  const userText = `CURRENT REFLECTIONS:
+${joinOrEmpty2(reflections.map(reflectionToSummaryLine))}
+
+CURRENT OBSERVATIONS:
+${joinOrEmpty2(observations.map((observation) => observationToDropperLine(observation, coverageTierForObservation(observation, coverageById))))}
+
+Active observation pool: ~${observationTokens.toLocaleString()} tokens; target: ~${targetTokens.toLocaleString()} tokens; fullness against target: ~${fullnessPercent.toLocaleString()}%; over target by ~${tokensOverTarget.toLocaleString()} tokens.
+Maximum drops allowed this run: ${maxDropsAllowed.toLocaleString()} observation${maxDropsAllowed === 1 ? "" : "s"}. This maximum is sized to move the active pool toward the target if every proposed drop is clearly safe.
+This maximum is a hard upper bound, not a target. Drop fewer or none if fewer observations are clearly safe.`;
+  const prompts = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
+  const context = {
+    messages: [{ role: "system", content: DROPPER_SYSTEM, timestamp: Date.now() }],
+    tools: [dropObservations]
+  };
+  const reasoning = model.reasoning;
+  const thinkingLevel = args.thinkingLevel ?? "low";
+  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : void 0;
+  let turnCount = 0;
+  const config = {
+    model,
+    apiKey,
+    headers,
+    env,
+    maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
+    convertToLlm: (msgs) => msgs,
+    toolExecution: "sequential",
+    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {},
+    ...effectiveMaxTurns !== void 0 ? {
+      finishTurn: (turn) => {
+        if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return;
+        return ++turnCount >= effectiveMaxTurns ? { action: "end" } : void 0;
+      }
+    } : {}
+  };
+  const loop = args.agentLoop ?? agentLoop2;
+  const stream = loop(
+    prompts,
+    context,
+    config,
+    signal,
+    resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
+  );
+  let streamError;
+  for await (const event of stream) {
+    logAgentStreamError("dropper", event);
+    const message = event.message;
+    if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+      streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+    }
+  }
+  await stream.result();
+  const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
+  if (droppedIds.length === 0 && streamError) throw new DropperStreamError(streamError.stopReason, streamError.errorMessage);
+  const reason = droppedIds.length > 0 ? "selected_nonempty" : toolCallCount === 0 ? "no_tool_call" : proposedDropIds.length === 0 ? "all_filtered" : "selected_empty";
+  const selectedDropTokens = droppedIds.reduce((sum, id) => sum + (allowed.get(id)?.tokenCount ?? 0), 0);
+  debugLog("dropper.result", {
+    reason,
+    toolCallCount,
+    rawRequestedIdsCount,
+    missingIdsCount,
+    criticalCandidateIdsCount,
+    duplicateInRequestCount,
+    duplicateInRunCount,
+    acceptedCandidateCount: proposedDropIds.length,
+    selectedDropsCount: droppedIds.length,
+    selectedDropTokens,
+    selectedCoverageSummaryByRelevance: summarizeCoverageByRelevanceForIds(droppedIds, observations, coverageById),
+    maxDropsAllowed
+  });
+  return droppedIds.length > 0 ? droppedIds : void 0;
 }
 
 // src/agents/reflector/agent.ts
@@ -2323,6 +2773,175 @@ Crystallize any missing durable facts or patterns into new reflections. If nothi
   return acceptedReflections.length > 0 ? acceptedReflections : void 0;
 }
 
+// src/agents/retirer/agent.ts
+import { agentLoop as agentLoop4 } from "@earendil-works/pi-agent-core";
+import { Type as Type4 } from "@earendil-works/pi-ai";
+
+// src/agents/retirer/prompts.ts
+var RETIRER_SYSTEM = `You are the retirement agent for a coding assistant's compacted memory.
+
+After every compaction the assistant sees all active reflections: its durable memory of this session. Reflections are only ever added, so the list collects duplicates and statements that later reflections have made outdated. They waste the assistant's context and can make it act on a state that no longer holds. Retiring a reflection removes it from that context; it stays in the session ledger and can still be recalled by id.
+
+You receive the active reflections, oldest first. Each line is "[id] YYYY-MM-DD HH:MM content", where the time is when it was recorded; lines without a time are the newest.
+
+Retire a reflection only when a reflection you keep makes it unnecessary:
+- Duplicate: a kept reflection states the same meaning or all of it. Keep the most complete one; when they are equally complete, keep the later one.
+- Superseded: a later kept reflection records a newer state of the same subject, so the older one is now false or misleading. Examples: a status changed, a pending decision was made, planned work was launched or delivered, a blocker was resolved, an earlier claim was corrected, a PR head, SHA, branch or stack moved.
+
+Keep:
+- User preferences, constraints, corrections and decisions, invariants, rationale, and completed outcomes, unless a kept reflection preserves the same meaning.
+- A reflection that is partly outdated but still holds a durable fact no kept reflection states.
+- Anything you are unsure about.
+
+A reflection about an open question or pending decision is superseded only by a later reflection that records its answer. Never retire a reflection because it is old, long, or about finished work: finished work that future runs must not redo is durable.
+
+Call retire_reflections with each retirement and the ids of the kept reflections that cover it. Every keptBy id must be an active reflection that you are not retiring. If nothing qualifies, do not call the tool and reply briefly.`;
+
+// src/agents/retirer/agent.ts
+var RetirerStreamError = class extends Error {
+  stopReason;
+  constructor(stopReason, errorMessage) {
+    super(`retirer stream ended with stopReason "${stopReason}"${errorMessage ? `: ${errorMessage}` : ""}`);
+    this.name = "RetirerStreamError";
+    this.stopReason = stopReason;
+  }
+};
+var RetireReflectionsSchema = Type4.Object({
+  retirements: Type4.Array(
+    Type4.Object({
+      id: Type4.String({ minLength: 1 }),
+      reason: Type4.Union([Type4.Literal("duplicate"), Type4.Literal("superseded")]),
+      keptBy: Type4.Array(Type4.String({ minLength: 1 }), { minItems: 1 })
+    }),
+    { minItems: 1 }
+  )
+});
+var RetirementSelection = class {
+  activeIds;
+  retired = /* @__PURE__ */ new Set();
+  keepers = /* @__PURE__ */ new Set();
+  constructor(reflections) {
+    this.activeIds = new Set(reflections.map((reflection) => reflection.id));
+  }
+  propose(retirement) {
+    const { id, keptBy } = retirement;
+    if (!this.activeIds.has(id)) return "unknown_id";
+    if (this.retired.has(id)) return "already_retired";
+    if (this.keepers.has(id)) return "kept_by_another";
+    const keepers = new Set(keptBy);
+    for (const keeperId of keepers) {
+      if (keeperId === id || !this.activeIds.has(keeperId) || this.retired.has(keeperId)) return "invalid_kept_by";
+    }
+    this.retired.add(id);
+    for (const keeperId of keepers) this.keepers.add(keeperId);
+    return void 0;
+  }
+  retiredIds() {
+    return Array.from(this.retired);
+  }
+};
+function joinOrEmpty4(items) {
+  return items.length ? items.join("\n") : "(none yet)";
+}
+async function runRetirer(args) {
+  const { model, apiKey, headers, env, reflections, signal } = args;
+  if (reflections.length < 2) return void 0;
+  debugLog("retirer.agent_start", { reflectionCount: reflections.length });
+  const selection = new RetirementSelection(reflections);
+  let toolCallCount = 0;
+  let proposedCount = 0;
+  const acceptedByReason = { duplicate: 0, superseded: 0 };
+  const rejectedByReason = {
+    unknown_id: 0,
+    already_retired: 0,
+    kept_by_another: 0,
+    invalid_kept_by: 0
+  };
+  const retireReflections = {
+    name: "retire_reflections",
+    label: "Retire reflections",
+    description: "Retire duplicate or superseded reflections, naming the kept reflections that cover each one.",
+    parameters: RetireReflectionsSchema,
+    execute: async (_id, params) => {
+      toolCallCount++;
+      proposedCount += params.retirements.length;
+      let accepted = 0;
+      const rejected = [];
+      for (const retirement of params.retirements) {
+        const rejection = selection.propose(retirement);
+        if (rejection) {
+          rejectedByReason[rejection]++;
+          rejected.push(`${retirement.id} (${rejection})`);
+          continue;
+        }
+        acceptedByReason[retirement.reason]++;
+        accepted++;
+      }
+      const rejectedText = rejected.length > 0 ? ` Rejected: ${rejected.join(", ")}.` : "";
+      return {
+        content: [{ type: "text", text: `Retired ${accepted} reflection${accepted === 1 ? "" : "s"}.${rejectedText}` }],
+        details: { accepted, rejected: rejected.length }
+      };
+    }
+  };
+  const userText = `ACTIVE REFLECTIONS (oldest first):
+${joinOrEmpty4(reflections.map(reflectionToSummaryLine))}
+
+Retire the reflections that kept ones make duplicate or superseded. If none qualify, do not call the tool.`;
+  const prompts = [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }];
+  const context = {
+    messages: [{ role: "system", content: RETIRER_SYSTEM, timestamp: Date.now() }],
+    tools: [retireReflections]
+  };
+  const reasoning = model.reasoning;
+  const thinkingLevel = args.thinkingLevel ?? "low";
+  const effectiveMaxTurns = args.maxTurns && args.maxTurns > 0 ? args.maxTurns : void 0;
+  let turnCount = 0;
+  const config = {
+    model,
+    apiKey,
+    headers,
+    env,
+    maxTokens: boundedMaxTokens(model, args.maxOutputTokens ?? AGENT_LOOP_MAX_TOKENS),
+    convertToLlm: (msgs) => msgs,
+    toolExecution: "sequential",
+    ...reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {},
+    ...effectiveMaxTurns !== void 0 ? {
+      finishTurn: (turn) => {
+        if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return;
+        return ++turnCount >= effectiveMaxTurns ? { action: "end" } : void 0;
+      }
+    } : {}
+  };
+  const loop = args.agentLoop ?? agentLoop4;
+  const stream = loop(
+    prompts,
+    context,
+    config,
+    signal,
+    resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
+  );
+  let streamError;
+  for await (const event of stream) {
+    logAgentStreamError("retirer", event);
+    const message = event.message;
+    if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+      streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
+    }
+  }
+  await stream.result();
+  const retiredIds = selection.retiredIds();
+  if (retiredIds.length === 0 && streamError) throw new RetirerStreamError(streamError.stopReason, streamError.errorMessage);
+  debugLog("retirer.result", {
+    toolCallCount,
+    proposedCount,
+    retiredCount: retiredIds.length,
+    acceptedByReason,
+    rejectedByReason
+  });
+  return retiredIds.length > 0 ? retiredIds : void 0;
+}
+
 // src/hooks/consolidation-trigger.ts
 function sourceEntriesAfter(entries, index) {
   return entries.slice(index + 1).filter(isSourceEntry);
@@ -2346,14 +2965,20 @@ function realContextTokens(ctx) {
   return typeof tokens === "number" && Number.isFinite(tokens) ? tokens : void 0;
 }
 function stageDue(entries, runtime, currentTokens, customType, rawEstimateFn, threshold) {
+  if (rawEstimateFn(entries) >= threshold) return true;
   if (currentTokens !== void 0) {
     const real = realTokensSinceAnchor(entries, customType, currentTokens);
     if (real !== void 0) return real >= threshold;
   }
-  return rawEstimateFn(entries) >= threshold;
+  return false;
+}
+function stageTokens(entries, customType, currentTokens, rawEstimateFn) {
+  const raw = rawEstimateFn(entries);
+  const real = currentTokens !== void 0 ? realTokensSinceAnchor(entries, customType, currentTokens) : void 0;
+  return real !== void 0 ? Math.max(raw, real) : raw;
 }
 function anyStageDue(entries, runtime, currentTokens) {
-  return stageDue(entries, runtime, currentTokens, OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens) || stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, rawTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
+  return stageDue(entries, runtime, currentTokens, OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens) || stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, observedTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
 }
 function shouldNotifyWorker(runtime, ctx) {
   return runtime.config.showWorkerNotifications && ctx.hasUI;
@@ -2445,10 +3070,11 @@ function makeModelResolver(runtime, ctx) {
   };
   return { resolve, resolveFallback };
 }
-async function runStageWithFallback(ctx, stage, resolved, resolver, work) {
+async function runStageWithFallback(ctx, stage, resolved, resolver, work, signal) {
   try {
     return await work(resolved);
   } catch (primaryError) {
+    if (signal?.aborted) throw primaryError;
     if (resolved.fallbackUsed === true) throw primaryError;
     const fallback = await resolver.resolveFallback(stage);
     if (!fallback) throw primaryError;
@@ -2467,12 +3093,38 @@ async function runStageWithFallback(ctx, stage, resolved, resolver, work) {
     return await work(fallback);
   }
 }
-function registerConsolidationTrigger(pi, runtime) {
-  const launch = (_event, ctx) => {
-    maybeLaunchConsolidation(pi, runtime, ctx);
+function registerConsolidationTrigger(pi, runtime, hooks = {}) {
+  const idleMode = (ctx) => {
+    runtime.ensureConfig(ctx.cwd);
+    return runtime.config.consolidateWhenIdle === true;
   };
-  pi.on("agent_start", launch);
-  pi.on("turn_end", launch);
+  pi.on("agent_start", (_event, ctx) => {
+    if (!idleMode(ctx)) {
+      maybeLaunchConsolidation(pi, runtime, ctx);
+      return;
+    }
+    if (runtime.abortConsolidation?.()) {
+      debugLog("consolidation.aborted", { reason: "agent_start" });
+      if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
+        "Observational memory: memory workers paused while the agent runs (consolidateWhenIdle)",
+        "info"
+      );
+    }
+  });
+  pi.on("turn_end", (_event, ctx) => {
+    if (idleMode(ctx)) return;
+    maybeLaunchConsolidation(pi, runtime, ctx);
+  });
+  pi.on("agent_settled", (_event, ctx) => {
+    if (!idleMode(ctx)) return;
+    const launched = maybeLaunchConsolidation(pi, runtime, ctx);
+    if (!hooks.afterIdleConsolidation) return;
+    if (!launched) {
+      hooks.afterIdleConsolidation(ctx);
+      return;
+    }
+    void launched.finally(() => hooks.afterIdleConsolidation?.(ctx));
+  });
 }
 function debugSessionMetadata(ctx) {
   try {
@@ -2486,10 +3138,10 @@ function debugSessionMetadata(ctx) {
 }
 function maybeLaunchConsolidation(pi, runtime, ctx) {
   runtime.ensureConfig(ctx.cwd);
-  if (runtime.config.passive === true) return;
-  if (runtime.consolidationInFlight) return;
+  if (runtime.config.passive === true) return void 0;
+  if (runtime.consolidationInFlight) return void 0;
   const entries = ctx.sessionManager.getBranch();
-  if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return;
+  if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return void 0;
   const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
   const consolidationCtx = {
     cwd: ctx.cwd,
@@ -2501,7 +3153,7 @@ function maybeLaunchConsolidation(pi, runtime, ctx) {
     sessionManager: ctx.sessionManager
   };
   const sessionMetadata = debugSessionMetadata(ctx);
-  void runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({
+  return runtime.launchConsolidationTask(ctx, async () => withDebugLogContext({
     enabled: runtime.config.debugLog === true,
     cwd: ctx.cwd,
     ...sessionMetadata,
@@ -2510,6 +3162,12 @@ function maybeLaunchConsolidation(pi, runtime, ctx) {
     await runConsolidationPipeline(pi, runtime, consolidationCtx);
   }));
 }
+function consolidationSignal(runtime) {
+  return runtime.consolidationAbortController?.signal;
+}
+function wasAborted(runtime) {
+  return consolidationSignal(runtime)?.aborted === true;
+}
 async function runConsolidationPipeline(pi, runtime, ctx) {
   const resolver = makeModelResolver(runtime, ctx);
   runtime.consolidationPhase = "observer";
@@ -2517,30 +3175,41 @@ async function runConsolidationPipeline(pi, runtime, ctx) {
     const observerOutcome = await runObserverStage(pi, runtime, ctx, resolver);
     if (observerOutcome === "abort") return;
   } catch (error) {
+    if (wasAborted(runtime)) return;
     debugLog("observer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "observer", error) });
     return;
   }
+  if (wasAborted(runtime)) return;
   runtime.consolidationPhase = "reflector";
   let reflectorResult;
   try {
     reflectorResult = await runReflectorStage(pi, runtime, ctx, resolver);
     if (reflectorResult.outcome === "abort") return;
   } catch (error) {
+    if (wasAborted(runtime)) return;
     debugLog("reflector.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "reflector", error) });
     return;
   }
+  if (wasAborted(runtime)) return;
   runtime.consolidationPhase = "dropper";
   try {
     await runDropperStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
   } catch (error) {
+    if (wasAborted(runtime)) return;
     debugLog("dropper.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "dropper", error) });
+  }
+  if (wasAborted(runtime)) return;
+  runtime.consolidationPhase = "retirer";
+  try {
+    await runRetirerStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
+  } catch (error) {
+    if (wasAborted(runtime)) return;
+    debugLog("retirer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "retirer", error) });
   }
 }
 async function runObserverStage(pi, runtime, ctx, resolver) {
   const entries = ctx.sessionManager.getBranch();
-  const currentTokens = realContextTokens(ctx);
-  const real = currentTokens !== void 0 ? realTokensSinceAnchor(entries, OM_OBSERVATIONS_RECORDED, currentTokens) : void 0;
-  const tokens = real !== void 0 ? real : rawTokensSinceObservationCoverage(entries);
+  const tokens = stageTokens(entries, OM_OBSERVATIONS_RECORDED, realContextTokens(ctx), rawTokensSinceObservationCoverage);
   if (tokens < runtime.config.observeAfterTokens) return "continue";
   const sessionMetadata = debugSessionMetadata(ctx);
   const sessionIdentity = sessionMetadata.sessionId ?? sessionMetadata.sessionFile;
@@ -2556,6 +3225,10 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
   }
   const resolved = await resolver.resolve("observer");
   if (!resolved) return "abort";
+  if (wasAborted(runtime)) {
+    debugLog("observer.aborted", {});
+    return "abort";
+  }
   const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
   const backlogEntries = sourceEntriesAfter(entries, lastCoverageIdx);
   const contextWindow = observerChunkContextWindow(runtime, ctx, resolved);
@@ -2579,7 +3252,8 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
       truncatedSourceEntryIds
     });
   }
-  const memory = fullProjection(entries);
+  const fullMemory = fullProjection(entries);
+  const memory = boundWorkerMemory(fullMemory.reflections, fullMemory.observations, resolveWorkerMemoryMaxTokens(runtime.config, contextWindow));
   const priorReflections = memory.reflections.map(reflectionToSummaryLine);
   const priorObservations = memory.observations.map(observationToSummaryLine);
   if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
@@ -2593,7 +3267,9 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
     sourceEntryIds,
     sourceEntryCount: sourceEntryIds.length,
     priorReflections: priorReflections.length,
-    priorObservations: priorObservations.length
+    priorObservations: priorObservations.length,
+    omittedReflections: memory.omittedReflections,
+    omittedObservations: memory.omittedObservations
   });
   let observations;
   try {
@@ -2608,15 +3284,24 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
       allowedSourceEntryIds: sourceEntryIds,
       maxTurns: runtime.config.agentMaxTurns,
       maxOutputTokens: runtime.config.agentMaxTokens,
+      signal: consolidationSignal(runtime),
       thinkingLevel: workerThinkingLevel(runtime, worker),
       modelRegistry: ctx.modelRegistry
-    }));
+    }), consolidationSignal(runtime));
   } catch (error) {
+    if (wasAborted(runtime)) {
+      debugLog("observer.aborted", { coversUpToId });
+      return "abort";
+    }
     if (error instanceof ObserverStreamError) {
       runtime.recordConsolidationStageError(ctx, "observer", error);
       return "abort";
     }
     throw error;
+  }
+  if (wasAborted(runtime)) {
+    debugLog("observer.aborted", { coversUpToId });
+    return "abort";
   }
   if (!observations || observations.length === 0) {
     debugLog("observer.empty", { coversUpToId });
@@ -2645,9 +3330,7 @@ async function runObserverStage(pi, runtime, ctx, resolver) {
 }
 async function runReflectorStage(pi, runtime, ctx, resolver) {
   const entries = ctx.sessionManager.getBranch();
-  const currentTokens = realContextTokens(ctx);
-  const real = currentTokens !== void 0 ? realTokensSinceAnchor(entries, OM_REFLECTIONS_RECORDED, currentTokens) : void 0;
-  const reflectionTokens = real !== void 0 ? real : rawTokensSinceReflectionCoverage(entries);
+  const reflectionTokens = stageTokens(entries, OM_REFLECTIONS_RECORDED, realContextTokens(ctx), observedTokensSinceReflectionCoverage);
   if (reflectionTokens < runtime.config.reflectAfterTokens) return { outcome: "continue", sameRunReflections: [] };
   const observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
   if (!observationCoverageId) return { outcome: "continue", sameRunReflections: [] };
@@ -2657,19 +3340,35 @@ async function runReflectorStage(pi, runtime, ctx, resolver) {
   );
   const resolved = await resolver.resolve("reflector");
   if (!resolved) return { outcome: "abort", sameRunReflections: [] };
+  if (wasAborted(runtime)) {
+    debugLog("reflector.aborted", {});
+    return { outcome: "abort", sameRunReflections: [] };
+  }
   const folded = foldLedger(entries);
-  const reflections = await runStageWithFallback(ctx, "reflector", resolved, resolver, (worker) => runReflector({
-    model: worker.model,
-    apiKey: worker.apiKey,
-    headers: worker.headers,
-    env: worker.env,
-    reflections: folded.reflections,
-    observations: folded.activeObservations,
-    maxTurns: runtime.config.agentMaxTurns,
-    maxOutputTokens: runtime.config.agentMaxTokens,
-    thinkingLevel: workerThinkingLevel(runtime, worker),
-    modelRegistry: ctx.modelRegistry
-  }));
+  const reflections = await runStageWithFallback(ctx, "reflector", resolved, resolver, (worker) => {
+    const reflectorMemory = boundWorkerMemory(
+      folded.activeReflections,
+      folded.activeObservations,
+      resolveWorkerMemoryMaxTokens(runtime.config, worker.model.contextWindow)
+    );
+    return runReflector({
+      model: worker.model,
+      apiKey: worker.apiKey,
+      headers: worker.headers,
+      env: worker.env,
+      reflections: reflectorMemory.reflections,
+      observations: reflectorMemory.observations,
+      maxTurns: runtime.config.agentMaxTurns,
+      maxOutputTokens: runtime.config.agentMaxTokens,
+      signal: consolidationSignal(runtime),
+      thinkingLevel: workerThinkingLevel(runtime, worker),
+      modelRegistry: ctx.modelRegistry
+    });
+  }, consolidationSignal(runtime));
+  if (wasAborted(runtime)) {
+    debugLog("reflector.aborted", {});
+    return { outcome: "abort", sameRunReflections: [] };
+  }
   if (!reflections) return { outcome: "continue", sameRunReflections: [] };
   const data = buildReflectionsRecordedData(reflections, observationCoverageId);
   if (!data) return { outcome: "continue", sameRunReflections: [] };
@@ -2719,20 +3418,37 @@ async function runDropperStage(pi, runtime, ctx, resolver, sameRunReflections, s
   );
   const resolved = await resolver.resolve("dropper");
   if (!resolved) return "abort";
-  const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
-  const droppedIds = await runStageWithFallback(ctx, "dropper", resolved, resolver, (worker) => runDropper({
-    model: worker.model,
-    apiKey: worker.apiKey,
-    headers: worker.headers,
-    env: worker.env,
-    reflections: reflectionsForDropper,
-    observations: folded.activeObservations,
-    targetTokens: runtime.config.observationsPoolTargetTokens,
-    maxTurns: runtime.config.agentMaxTurns,
-    maxOutputTokens: runtime.config.agentMaxTokens,
-    thinkingLevel: workerThinkingLevel(runtime, worker),
-    modelRegistry: ctx.modelRegistry
-  }));
+  if (wasAborted(runtime)) {
+    debugLog("dropper.aborted", {});
+    return "abort";
+  }
+  const reflectionsForDropper = mergeReflections(folded.activeReflections, sameRunReflections);
+  const droppedIds = await runStageWithFallback(ctx, "dropper", resolved, resolver, (worker) => {
+    const dropperMemory = boundWorkerMemory(
+      reflectionsForDropper,
+      folded.activeObservations,
+      resolveWorkerMemoryMaxTokens(runtime.config, worker.model.contextWindow),
+      { observationsFrom: "oldest" }
+    );
+    return runDropper({
+      model: worker.model,
+      apiKey: worker.apiKey,
+      headers: worker.headers,
+      env: worker.env,
+      reflections: dropperMemory.reflections,
+      observations: dropperMemory.observations,
+      targetTokens: runtime.config.observationsPoolTargetTokens,
+      maxTurns: runtime.config.agentMaxTurns,
+      maxOutputTokens: runtime.config.agentMaxTokens,
+      signal: consolidationSignal(runtime),
+      thinkingLevel: workerThinkingLevel(runtime, worker),
+      modelRegistry: ctx.modelRegistry
+    });
+  }, consolidationSignal(runtime));
+  if (wasAborted(runtime)) {
+    debugLog("dropper.aborted", {});
+    return "abort";
+  }
   const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
   const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : void 0;
   debugLog("dropper.append", {
@@ -2742,6 +3458,73 @@ async function runDropperStage(pi, runtime, ctx, resolver, sameRunReflections, s
     appended: data !== void 0
   });
   if (data) appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
+  return "continue";
+}
+async function resolveRetirerModel(runtime, ctx, resolver) {
+  const memoryModel = async () => {
+    const resolved = await resolver.resolve("retirer");
+    return resolved ? { resolved } : void 0;
+  };
+  const target = runtime.config.retirerModel;
+  if (!target) return memoryModel();
+  const result = await runtime.resolveConfiguredModel({
+    model: ctx.model,
+    modelRegistry: ctx.modelRegistry,
+    hasUI: ctx.hasUI,
+    ui: ctx.ui
+  }, target);
+  if (result.ok) return { resolved: workerHeadersFor(ctx, result), thinking: target.thinking };
+  debugLog("retirer.model_unavailable", { reason: result.reason });
+  if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: retirer model unavailable (${result.reason}), using the memory model`, "warning");
+  return memoryModel();
+}
+async function runRetirerStage(pi, runtime, ctx, resolver, sameRunReflections, sameRunReflectionCoverageId) {
+  if (!sameRunReflectionCoverageId || sameRunReflections.length === 0) return "continue";
+  const entries = ctx.sessionManager.getBranch();
+  const reflections = mergeReflections(foldLedger(entries).activeReflections, sameRunReflections);
+  const reflectionTokens = reflections.reduce((sum, reflection) => sum + reflection.tokenCount, 0);
+  if (reflectionTokens < runtime.config.reflectionsPoolMaxTokens) {
+    debugLog("retirer.not_ready", { reflectionTokens, maxTokens: runtime.config.reflectionsPoolMaxTokens });
+    return "continue";
+  }
+  if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
+    `Observational memory: retirer running \u2014 active reflections ~${reflectionTokens.toLocaleString()} / ${runtime.config.reflectionsPoolMaxTokens.toLocaleString()} tokens`,
+    "info"
+  );
+  const retirerModel = await resolveRetirerModel(runtime, ctx, resolver);
+  if (!retirerModel) return "abort";
+  const { resolved } = retirerModel;
+  if (wasAborted(runtime)) {
+    debugLog("retirer.aborted", {});
+    return "abort";
+  }
+  const retiredIds = await runStageWithFallback(ctx, "retirer", resolved, resolver, (worker) => {
+    const retirerMemory = boundWorkerMemory(
+      reflections,
+      [],
+      resolveWorkerMemoryMaxTokens(runtime.config, worker.model.contextWindow)
+    );
+    const thinkingLevel = worker === resolved && retirerModel.thinking ? retirerModel.thinking : workerThinkingLevel(runtime, worker);
+    return runRetirer({
+      model: worker.model,
+      apiKey: worker.apiKey,
+      headers: worker.headers,
+      env: worker.env,
+      reflections: retirerMemory.reflections,
+      maxTurns: runtime.config.agentMaxTurns,
+      maxOutputTokens: runtime.config.agentMaxTokens,
+      signal: consolidationSignal(runtime),
+      thinkingLevel,
+      modelRegistry: ctx.modelRegistry
+    });
+  }, consolidationSignal(runtime));
+  if (wasAborted(runtime)) {
+    debugLog("retirer.aborted", {});
+    return "abort";
+  }
+  const data = retiredIds ? buildReflectionsRetiredData(retiredIds, sameRunReflectionCoverageId) : void 0;
+  debugLog("retirer.append", { retiredIdsCount: retiredIds?.length ?? 0, coversUpToId: sameRunReflectionCoverageId, appended: data !== void 0 });
+  if (data) appendEntry(pi, OM_REFLECTIONS_RETIRED, data);
   return "continue";
 }
 
@@ -2774,12 +3557,15 @@ var Runtime = class {
   consolidationInFlight = false;
   consolidationPromise = null;
   consolidationPhase;
+  /** Aborts the in-flight consolidation run's model calls (see `consolidateWhenIdle`). */
+  consolidationAbortController;
   compactInFlight = false;
   compactHookInFlight = false;
   resolveFailureNotified = false;
   lastObserverError;
   lastReflectorError;
   lastDropperError;
+  lastRetirerError;
   /** provider -> epoch ms of the last availability re-check (see `recheckProviderCredential`). */
   availabilityRecheckedAt = /* @__PURE__ */ new Map();
   /** Deliberate-empty backoff (#23): skip observer re-fires over the same span until enough new tokens arrive. */
@@ -2850,6 +3636,12 @@ var Runtime = class {
     }
     const model = ctx.modelRegistry.find(target.provider, target.id);
     if (!model) return { ok: false, reason: `fallback model ${target.provider}/${target.id} not found` };
+    return this.resolveCandidate(ctx, model);
+  }
+  /** Resolve one explicitly configured model (such as `config.retirerModel`) with the same auth rules. */
+  async resolveConfiguredModel(ctx, target) {
+    const model = ctx.modelRegistry.find(target.provider, target.id);
+    if (!model) return { ok: false, reason: `model ${target.provider}/${target.id} not found` };
     return this.resolveCandidate(ctx, model);
   }
   /** Apply Pi's request-auth acceptance rule to one already-selected model. */
@@ -2946,19 +3738,31 @@ var Runtime = class {
     this.lastObserverError = void 0;
     this.lastReflectorError = void 0;
     this.lastDropperError = void 0;
+    this.lastRetirerError = void 0;
+    const controller = new AbortController();
+    this.consolidationAbortController = controller;
     const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
       this.consolidationInFlight = false;
       this.consolidationPhase = void 0;
+      if (this.consolidationAbortController === controller) this.consolidationAbortController = void 0;
       if (this.consolidationPromise === promise) this.consolidationPromise = null;
     });
     this.consolidationPromise = promise;
     return promise;
+  }
+  /** Abort the in-flight consolidation run, if any. Returns true when one was running. */
+  abortConsolidation() {
+    const controller = this.consolidationAbortController;
+    if (!controller || !this.consolidationInFlight) return false;
+    controller.abort();
+    return true;
   }
   recordConsolidationStageError(ctx, phase, error) {
     const message = error instanceof Error ? error.message : String(error);
     if (phase === "observer") this.lastObserverError = message;
     if (phase === "reflector") this.lastReflectorError = message;
     if (phase === "dropper") this.lastDropperError = message;
+    if (phase === "retirer") this.lastRetirerError = message;
     if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
     return message;
   }
@@ -2980,7 +3784,7 @@ var Runtime = class {
 };
 
 // src/tools/recall-observation.ts
-import { Type as Type4 } from "@earendil-works/pi-ai";
+import { Type as Type5 } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 var RECALL_OBSERVATION_TOOL_NAME = "recall";
@@ -3323,8 +4127,8 @@ var recallObservationTool = defineTool({
     "Do not use recall as semantic search or transcript browsing; you must already have a specific 12-character memory id.",
     "Do not recall every id preemptively. Recall only when exact source context will materially improve the next action."
   ],
-  parameters: Type4.Object({
-    id: Type4.String({
+  parameters: Type5.Object({
+    id: Type5.String({
       pattern: "^[a-f0-9]{12}$",
       description: "12-character lowercase hex observation or reflection id shown in compacted memory, /om:view, or a previous recall result. Must be a specific id; this tool does not search by topic."
     })
@@ -3357,7 +4161,9 @@ function registerRecallTool(pi) {
 // src/index.ts
 function observationalMemory(pi) {
   const runtime = new Runtime();
-  registerConsolidationTrigger(pi, runtime);
+  registerConsolidationTrigger(pi, runtime, {
+    afterIdleConsolidation: (ctx) => maybeTriggerCompaction(runtime, ctx)
+  });
   registerCompactionTrigger(pi, runtime);
   registerCompactionHook(pi, runtime);
   registerStatusCommand(pi, runtime);

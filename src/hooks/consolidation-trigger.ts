@@ -1,8 +1,10 @@
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { ObserverStreamError, runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
+import { runRetirer } from "../agents/retirer/agent.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
 import { resolveObserverChunkMaxTokens, resolveWorkerMemoryMaxTokens } from "../config.js";
 import type { ConsolidationPhase, ResolveCtx, ResolveResult, Runtime } from "../runtime.js";
@@ -11,10 +13,12 @@ import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_RECORDED,
+	OM_REFLECTIONS_RETIRED,
 	buildObservationsDroppedData,
 	buildObservationsRecordedData,
 	boundWorkerMemory,
 	buildReflectionsRecordedData,
+	buildReflectionsRetiredData,
 	earlierCoverageMarkerId,
 	foldLedger,
 	fullProjection,
@@ -419,6 +423,15 @@ export async function runConsolidationPipeline(
 		if (wasAborted(runtime)) return;
 		debugLog("dropper.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "dropper", error) });
 	}
+	if (wasAborted(runtime)) return;
+
+	runtime.consolidationPhase = "retirer";
+	try {
+		await runRetirerStage(pi, runtime, ctx, resolver, reflectorResult.sameRunReflections, reflectorResult.effectiveReflectionCoverageId);
+	} catch (error) {
+		if (wasAborted(runtime)) return;
+		debugLog("retirer.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "retirer", error) });
+	}
 }
 
 async function runObserverStage(
@@ -603,7 +616,7 @@ async function runReflectorStage(
 	const folded = foldLedger(entries);
 	const reflections = await runStageWithFallback(ctx, "reflector", resolved, resolver, (worker) => {
 		const reflectorMemory = boundWorkerMemory(
-			folded.reflections,
+			folded.activeReflections,
 			folded.activeObservations,
 			resolveWorkerMemoryMaxTokens(runtime.config, (worker.model as { contextWindow?: number }).contextWindow),
 		);
@@ -691,7 +704,7 @@ async function runDropperStage(
 		return "abort";
 	}
 
-	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
+	const reflectionsForDropper = mergeReflections(folded.activeReflections, sameRunReflections);
 	const droppedIds = await runStageWithFallback(ctx, "dropper", resolved, resolver, (worker) => {
 		// The dropper prunes old observations, so it sees the oldest ones that fit.
 		const dropperMemory = boundWorkerMemory(
@@ -728,5 +741,96 @@ async function runDropperStage(
 		appended: data !== undefined,
 	});
 	if (data) appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
+	return "continue";
+}
+
+/** The retirer's model: `config.retirerModel` when it resolves, otherwise the memory model. */
+async function resolveRetirerModel(
+	runtime: Runtime,
+	ctx: ConsolidationCtx,
+	resolver: ModelResolver,
+): Promise<{ resolved: ResolvedModel; thinking?: ModelThinkingLevel } | undefined> {
+	const memoryModel = async () => {
+		const resolved = await resolver.resolve("retirer");
+		return resolved ? { resolved } : undefined;
+	};
+	const target = runtime.config.retirerModel;
+	if (!target) return memoryModel();
+	const result = await runtime.resolveConfiguredModel({
+		model: ctx.model,
+		modelRegistry: ctx.modelRegistry,
+		hasUI: ctx.hasUI,
+		ui: ctx.ui,
+	}, target);
+	if (result.ok) return { resolved: workerHeadersFor(ctx, result), thinking: target.thinking };
+	debugLog("retirer.model_unavailable", { reason: result.reason });
+	if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: retirer model unavailable (${result.reason}), using the memory model`, "warning");
+	return memoryModel();
+}
+
+/**
+ * Retire duplicate and superseded reflections. Runs only after a reflector pass
+ * recorded new reflections, because only a new reflection can make an older one
+ * outdated, and only once the active pool reaches `reflectionsPoolMaxTokens`.
+ */
+async function runRetirerStage(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	ctx: ConsolidationCtx,
+	resolver: ModelResolver,
+	sameRunReflections: Reflection[],
+	sameRunReflectionCoverageId: string | undefined,
+): Promise<StageOutcome> {
+	if (!sameRunReflectionCoverageId || sameRunReflections.length === 0) return "continue";
+
+	const entries = ctx.sessionManager.getBranch() as Entry[];
+	const reflections = mergeReflections(foldLedger(entries).activeReflections, sameRunReflections);
+	const reflectionTokens = reflections.reduce((sum, reflection) => sum + reflection.tokenCount, 0);
+	if (reflectionTokens < runtime.config.reflectionsPoolMaxTokens) {
+		debugLog("retirer.not_ready", { reflectionTokens, maxTokens: runtime.config.reflectionsPoolMaxTokens });
+		return "continue";
+	}
+
+	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
+		`Observational memory: retirer running — active reflections ~${reflectionTokens.toLocaleString()} / ${runtime.config.reflectionsPoolMaxTokens.toLocaleString()} tokens`,
+		"info",
+	);
+	const retirerModel = await resolveRetirerModel(runtime, ctx, resolver);
+	if (!retirerModel) return "abort";
+	const { resolved } = retirerModel;
+	if (wasAborted(runtime)) {
+		debugLog("retirer.aborted", {});
+		return "abort";
+	}
+
+	const retiredIds = await runStageWithFallback(ctx, "retirer", resolved, resolver, (worker) => {
+		const retirerMemory = boundWorkerMemory(
+			reflections,
+			[],
+			resolveWorkerMemoryMaxTokens(runtime.config, (worker.model as { contextWindow?: number }).contextWindow),
+		);
+		const thinkingLevel = worker === resolved && retirerModel.thinking
+			? retirerModel.thinking
+			: workerThinkingLevel(runtime, worker);
+		return runRetirer({
+			model: worker.model as any,
+			apiKey: worker.apiKey,
+			headers: worker.headers,
+			env: worker.env,
+			reflections: retirerMemory.reflections,
+			maxTurns: runtime.config.agentMaxTurns,
+			maxOutputTokens: runtime.config.agentMaxTokens,
+			signal: consolidationSignal(runtime),
+			thinkingLevel,
+			modelRegistry: ctx.modelRegistry,
+		});
+	}, consolidationSignal(runtime));
+	if (wasAborted(runtime)) {
+		debugLog("retirer.aborted", {});
+		return "abort";
+	}
+	const data = retiredIds ? buildReflectionsRetiredData(retiredIds, sameRunReflectionCoverageId) : undefined;
+	debugLog("retirer.append", { retiredIdsCount: retiredIds?.length ?? 0, coversUpToId: sameRunReflectionCoverageId, appended: data !== undefined });
+	if (data) appendEntry(pi, OM_REFLECTIONS_RETIRED, data);
 	return "continue";
 }

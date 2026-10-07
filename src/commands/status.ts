@@ -58,8 +58,11 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				],
 			);
 			const reflectionLine = appendSuffixes(
-				`Reflections:  ${folded.reflections.length} recorded / ${visible.reflections.length} visible`,
-				[addedSuffix(drift.reflectionsOnlyInFull.length)],
+				`Reflections:  ${folded.reflections.length} recorded / ${folded.retiredReflectionIds.size} retired / ${folded.activeReflections.length} active / ${visible.reflections.length} visible`,
+				[
+					addedSuffix(drift.reflectionsOnlyInFull.length),
+					removedSuffix(drift.retiredOnlyInFull.length),
+				],
 			);
 			const obsProgress = rawTokensSinceObservationCoverage(entries);
 			const reflectionProgress = observedTokensSinceReflectionCoverage(entries);
@@ -102,11 +105,12 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				if (runtime.compactHookInFlight) lines.push("Compaction hook: running");
 			}
 
-			if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastDropperError) {
+			if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastDropperError || runtime.lastRetirerError) {
 				lines.push("", "── Last error ──");
 				if (runtime.lastObserverError) lines.push(`Observer: ${runtime.lastObserverError}`);
 				if (runtime.lastReflectorError) lines.push(`Reflector: ${runtime.lastReflectorError}`);
 				if (runtime.lastDropperError) lines.push(`Dropper: ${runtime.lastDropperError}`);
+				if (runtime.lastRetirerError) lines.push(`Retirer: ${runtime.lastRetirerError}`);
 			}
 
 			ctx.ui.notify(lines.join("\n"), "info");

@@ -4,11 +4,13 @@ import {
 	isObservationsDroppedEntry,
 	isObservationsRecordedEntry,
 	isReflectionsRecordedEntry,
+	isReflectionsRetiredEntry,
 	type Entry,
 	type MemoryDetails,
 	type Observation,
 	type Reflection,
 } from "./types.js";
+import { withRecordedAt } from "./fold.js";
 
 export type Projection = {
 	observations: Observation[];
@@ -19,6 +21,7 @@ export type ProjectionDiff = {
 	observationsOnlyInFull: Observation[];
 	reflectionsOnlyInFull: Reflection[];
 	droppedOnlyInFull: Observation[];
+	retiredOnlyInFull: Reflection[];
 };
 
 export type CompactionProjectionConfig = {
@@ -91,6 +94,7 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 	const observationsById = new Set<string>();
 	const reflectionsById = new Set<string>();
 	const droppedObservationIds = new Set<string>();
+	const retiredReflectionIds = new Set<string>();
 
 	for (const entry of entries) {
 		if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary)) {
@@ -106,8 +110,15 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 			for (const reflection of entry.data.reflections) {
 				if (reflectionsById.has(reflection.id)) continue;
 				reflectionsById.add(reflection.id);
-				reflections.push(reflection);
+				reflections.push(withRecordedAt(reflection, entry));
 			}
+			continue;
+		}
+
+		// Retirements share the reflections boundary: a retirement's coverage is the
+		// reflection marker it saw, so it applies only where the reflections it kept are visible.
+		if (isReflectionsRetiredEntry(entry) && isCoveredAtOrBefore(entry, indexes, reflectionsBoundary)) {
+			for (const reflectionId of entry.data.reflectionIds) retiredReflectionIds.add(reflectionId);
 			continue;
 		}
 
@@ -118,7 +129,7 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 
 	return {
 		observations: observations.filter((observation) => !droppedObservationIds.has(observation.id)),
-		reflections,
+		reflections: reflections.filter((reflection) => !retiredReflectionIds.has(reflection.id)),
 	};
 }
 
@@ -217,10 +228,12 @@ export function diffProjection(visible: Projection, full: Projection): Projectio
 	const visibleObservationIds = new Set(visible.observations.map((observation) => observation.id));
 	const fullObservationIds = new Set(full.observations.map((observation) => observation.id));
 	const visibleReflectionIds = new Set(visible.reflections.map((reflection) => reflection.id));
+	const fullReflectionIds = new Set(full.reflections.map((reflection) => reflection.id));
 
 	return {
 		observationsOnlyInFull: full.observations.filter((observation) => !visibleObservationIds.has(observation.id)),
 		reflectionsOnlyInFull: full.reflections.filter((reflection) => !visibleReflectionIds.has(reflection.id)),
 		droppedOnlyInFull: visible.observations.filter((observation) => !fullObservationIds.has(observation.id)),
+		retiredOnlyInFull: visible.reflections.filter((reflection) => !fullReflectionIds.has(reflection.id)),
 	};
 }

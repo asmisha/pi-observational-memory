@@ -114,7 +114,7 @@ describe("V3 /om:view", () => {
 
 		expect(copyToClipboard).toHaveBeenCalledTimes(1);
 		expect(clipboardText).toContain("── Reflections ──");
-		expect(clipboardText).toContain("[eeeeeeeeeeee] Reflection eeeeeeeeeeee");
+		expect(clipboardText).toMatch(/\[eeeeeeeeeeee\] \d{4}-\d{2}-\d{2} \d{2}:\d{2} Reflection eeeeeeeeeeee/);
 		expect(clipboardText).toContain("── Observations ──");
 		expect(clipboardText).toContain("[bbbbbbbbbbbb]");
 		expect(clipboardText).toContain("Kept observation content");

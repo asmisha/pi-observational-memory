@@ -71,6 +71,12 @@ export interface Config {
 	workerMemoryMaxTokens?: number;
 	observationsPoolMaxTokens: number;
 	observationsPoolTargetTokens: number;
+	/**
+	 * Estimated tokens of active reflections at which the retirer runs after a
+	 * reflector pass that recorded new reflections. The retirer only removes
+	 * duplicate or superseded reflections, so the pool can stay above this.
+	 */
+	reflectionsPoolMaxTokens: number;
 	agentMaxTurns: number;
 	/**
 	 * Maximum output tokens requested for background memory-agent loops
@@ -105,6 +111,12 @@ export interface Config {
 	 * fallback that also fails leaves the existing skip/fail-safe behavior intact.
 	 */
 	fallbackModel?: ConfiguredModel;
+	/**
+	 * Optional model for the retirer stage. Judging which reflections a later
+	 * one supersedes is harder than recording them, so this can name a stronger
+	 * model than `model`. Unset, or not found in Pi's registry, uses the memory model.
+	 */
+	retirerModel?: ConfiguredModel;
 	showWorkerNotifications: boolean;
 	passive: boolean;
 	debugLog: boolean;
@@ -125,6 +137,7 @@ export const DEFAULTS: Config = {
 	compactAfterTokensRatio: 0.68,
 	observationsPoolMaxTokens: 20_000,
 	observationsPoolTargetTokens: 10_000,
+	reflectionsPoolMaxTokens: 10_000,
 	agentMaxTurns: 16,
 	agentMaxTokens: 32_000,
 	compactionCatchUpMaxChunks: 2,
@@ -335,6 +348,7 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 		"workerMemoryMaxTokens",
 		"observationsPoolMaxTokens",
 		"observationsPoolTargetTokens",
+		"reflectionsPoolMaxTokens",
 		"agentMaxTurns",
 		"agentMaxTokens",
 	] as const;
@@ -358,6 +372,8 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	if (model) normalized.model = model;
 	const fallbackModel = normalizeModel(value.fallbackModel);
 	if (fallbackModel) normalized.fallbackModel = fallbackModel;
+	const retirerModel = normalizeModel(value.retirerModel);
+	if (retirerModel) normalized.retirerModel = retirerModel;
 	return normalized;
 }
 

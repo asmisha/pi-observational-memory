@@ -25,6 +25,18 @@ describe("session-ledger V3 summary rendering", () => {
 		expect(summary).toContain("## Reflections\n[eeeeeeeeeeee] User prefers source-backed memory.");
 	});
 
+	it("renders a reflection's recording time in local time and tells the model the latest record wins", () => {
+		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], {
+			content: "User prefers source-backed memory.",
+			recordedAt: new Date(2026, 4, 2, 10, 30).toISOString(),
+		});
+
+		const summary = renderSummary([ref], []);
+
+		expect(summary).toContain("## Reflections\n[eeeeeeeeeeee] 2026-05-02 10:30 User prefers source-backed memory.");
+		expect(summary).toContain("When entries conflict, the most recently recorded one, observation or reflection, reflects the latest known state.");
+	});
+
 	it("renders V3 observations with ids, timestamps, relevance, and content", () => {
 		const obs = observation("aaaaaaaaaaaa", {
 			content: "User confirmed recall should use exact source entry ids.",

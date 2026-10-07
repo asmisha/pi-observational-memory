@@ -774,6 +774,26 @@ describe("V3 consolidation trigger", () => {
 			);
 		});
 
+		it("does not retry a failed retirer call when the retirer model is also the fallback model", async () => {
+			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+			mockAgents.runRetirer.mockRejectedValueOnce(new Error("boom"));
+			const { fire, runLaunchedWork, runtime } = setup({
+				entries: entries(),
+				observeAfterTokens: 999,
+				reflectionsPoolMaxTokens: 1,
+				retirerModel: { provider: "anthropic", id: "strong", thinking: "high" },
+				resolveConfiguredModel: async () => ({ ok: true, model: { id: "strong" }, apiKey: "strong-key" }),
+			});
+			(runtime.config as any).fallbackModel = { provider: "anthropic", id: "strong" };
+			runtime.resolveFallbackModel.mockResolvedValue({ ok: true, model: { id: "strong" }, apiKey: "strong-key" } as any);
+
+			fire();
+			await runLaunchedWork();
+
+			expect(mockAgents.runRetirer).toHaveBeenCalledTimes(1);
+			expect(runtime.lastRetirerError).toBe("boom");
+		});
+
 		it("records a retirer failure without undoing the recorded reflections", async () => {
 			mockAgents.runReflector.mockResolvedValueOnce([newRef]);
 			mockAgents.runRetirer.mockRejectedValueOnce(new Error("boom"));

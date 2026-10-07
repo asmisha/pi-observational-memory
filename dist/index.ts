@@ -1112,7 +1112,7 @@ var CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in t
 - Reflections: stable, long-lived facts about the user, project, decisions, and constraints. Reflection lines show their id and, when known, the time they were recorded.
 - Observations: timestamped events from the conversation history, in chronological order. Observation lines include ids in brackets.
 
-Treat these as past records. When entries conflict, the most recently recorded one, observation or reflection, reflects the latest known state. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
+Treat these as past records. When entries conflict, the most recent observation reflects the latest known state, and among reflections the most recently recorded one wins. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
 
 When exact source context is needed for precision or traceability, use the recall tool with the relevant observation or reflection id. This is especially useful when a reflection materially affects a decision or is too compressed to continue confidently. Do not use recall as broad search or inject raw source unless it is needed.`;
 function observationToSummaryLine(observation) {
@@ -3473,7 +3473,11 @@ async function resolveRetirerModel(runtime, ctx, resolver) {
     hasUI: ctx.hasUI,
     ui: ctx.ui
   }, target);
-  if (result.ok) return { resolved: workerHeadersFor(ctx, result), thinking: target.thinking };
+  if (result.ok) {
+    const fallback = runtime.config.fallbackModel;
+    const fallbackUsed = fallback?.provider === target.provider && fallback.id === target.id;
+    return { resolved: workerHeadersFor(ctx, { ...result, ...fallbackUsed ? { fallbackUsed } : {} }), thinking: target.thinking };
+  }
   debugLog("retirer.model_unavailable", { reason: result.reason });
   if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: retirer model unavailable (${result.reason}), using the memory model`, "warning");
   return memoryModel();
@@ -3504,6 +3508,10 @@ async function runRetirerStage(pi, runtime, ctx, resolver, sameRunReflections, s
       [],
       resolveWorkerMemoryMaxTokens(runtime.config, worker.model.contextWindow)
     );
+    debugLog("retirer.start", {
+      reflectionCount: retirerMemory.reflections.length,
+      omittedReflections: retirerMemory.omittedReflections
+    });
     const thinkingLevel = worker === resolved && retirerModel.thinking ? retirerModel.thinking : workerThinkingLevel(runtime, worker);
     return runRetirer({
       model: worker.model,

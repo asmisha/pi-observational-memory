@@ -25,7 +25,7 @@ describe("session-ledger V3 summary rendering", () => {
 		expect(summary).toContain("## Reflections\n[eeeeeeeeeeee] User prefers source-backed memory.");
 	});
 
-	it("renders a reflection's recording time in local time and tells the model the latest record wins", () => {
+	it("renders a reflection's recording time in local time and tells the model the latest reflection wins", () => {
 		const ref = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], {
 			content: "User prefers source-backed memory.",
 			recordedAt: new Date(2026, 4, 2, 10, 30).toISOString(),
@@ -34,7 +34,7 @@ describe("session-ledger V3 summary rendering", () => {
 		const summary = renderSummary([ref], []);
 
 		expect(summary).toContain("## Reflections\n[eeeeeeeeeeee] 2026-05-02 10:30 User prefers source-backed memory.");
-		expect(summary).toContain("When entries conflict, the most recently recorded one, observation or reflection, reflects the latest known state.");
+		expect(summary).toContain("When entries conflict, the most recent observation reflects the latest known state, and among reflections the most recently recorded one wins.");
 	});
 
 	it("renders V3 observations with ids, timestamps, relevance, and content", () => {
@@ -80,10 +80,10 @@ describe("budgeted summary rendering", () => {
 	});
 
 	it("keeps all reflections and the newest observations that fit when reflections are small", () => {
-		// Fixed overhead ~275 tokens, each line ~38 tokens. Budget 500 leaves
+		// Fixed overhead ~297 tokens, each line ~38 tokens. Budget 522 leaves
 		// ~225: observations reserve half (2 lines), reflections take the rest
 		// (3 lines fit), observations reclaim nothing more.
-		const rendered = renderSummaryWithBudget(reflections, observations, { maxTokens: 500 });
+		const rendered = renderSummaryWithBudget(reflections, observations, { maxTokens: 522 });
 
 		expect(rendered.reflections).toHaveLength(3);
 		expect(rendered.observations.map((obs) => obs.id)).toEqual(["a3aaaaaaaaaa", "a4aaaaaaaaaa"]);

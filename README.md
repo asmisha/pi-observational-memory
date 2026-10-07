@@ -89,7 +89,7 @@ Examples:
 
 Reflections help the agent stay oriented over time. The reflector treats coverage as stewardship: every active observation it reviews includes a `none`, `partial`, or `strong` coverage tier, but those tiers are review context rather than quotas. When the reflector emits a durable reflection, its support ids should cover all and only the observations whose durable meaning is actually preserved, because those ids later become dropper coverage evidence.
 
-Reflections are only ever added, so over a long session they collect duplicates and statements a later reflection has made outdated. After a reflector pass records new reflections, and once active reflections reach `reflectionsPoolMaxTokens`, the retirer reviews them and retires each one that a kept reflection duplicates or supersedes. Retired reflections leave the compaction summary and worker inputs but stay in the ledger, and `recall` still finds them. Each reflection line shows when it was recorded, so when two records conflict the agent can see which is newer.
+Reflections are only ever added, so over a long session they collect duplicates and statements a later reflection has made outdated. After a reflector pass records new reflections, and once active reflections reach `reflectionsPoolMaxTokens`, the retirer reviews them and retires each one that a kept reflection duplicates or supersedes. Retired reflections leave the compaction summary and worker inputs but stay in the ledger, and `recall` still finds them. Each reflection line shows when it was recorded, so when two reflections conflict the agent can see which is newer.
 
 Together, observations and reflections let Pi carry the important parts of the session forward without depending on fragile summary chains.
 

@@ -762,7 +762,12 @@ async function resolveRetirerModel(
 		hasUI: ctx.hasUI,
 		ui: ctx.ui,
 	}, target);
-	if (result.ok) return { resolved: workerHeadersFor(ctx, result), thinking: target.thinking };
+	if (result.ok) {
+		// A retirer model that is also the fallback model has no second model to retry on.
+		const fallback = runtime.config.fallbackModel;
+		const fallbackUsed = fallback?.provider === target.provider && fallback.id === target.id;
+		return { resolved: workerHeadersFor(ctx, { ...result, ...(fallbackUsed ? { fallbackUsed } : {}) }), thinking: target.thinking };
+	}
 	debugLog("retirer.model_unavailable", { reason: result.reason });
 	if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: retirer model unavailable (${result.reason}), using the memory model`, "warning");
 	return memoryModel();
@@ -809,6 +814,10 @@ async function runRetirerStage(
 			[],
 			resolveWorkerMemoryMaxTokens(runtime.config, (worker.model as { contextWindow?: number }).contextWindow),
 		);
+		debugLog("retirer.start", {
+			reflectionCount: retirerMemory.reflections.length,
+			omittedReflections: retirerMemory.omittedReflections,
+		});
 		const thinkingLevel = worker === resolved && retirerModel.thinking
 			? retirerModel.thinking
 			: workerThinkingLevel(runtime, worker);

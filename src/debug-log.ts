@@ -66,7 +66,7 @@ export function debugLog(event: string, data: Record<string, unknown> = {}): voi
 
 /** Usage is collected independently of verbose debug logging; no message bodies are accepted. */
 export function logUsage(data: {
-	stage: "observer" | "reflector" | "dropper";
+	stage: "observer" | "reflector" | "dropper" | "retirer";
 	provider: string;
 	model: string;
 	stopReason: string;

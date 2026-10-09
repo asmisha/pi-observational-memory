@@ -10,8 +10,9 @@ import { withDebugLogContext } from "../src/debug-log.js";
 import { runObserver, ObserverStreamError } from "../src/agents/observer/agent.js";
 import { runReflector } from "../src/agents/reflector/agent.js";
 import { runDropper } from "../src/agents/dropper/agent.js";
+import { runRetirer } from "../src/agents/retirer/agent.js";
 import { createUsageTracker } from "../src/agents/usage.js";
-import { observation } from "./fixtures/session.js";
+import { observation, reflection } from "./fixtures/session.js";
 
 const context = { enabled: false, sessionId: "session-a", sessionFile: "/private/session.jsonl", cwd: "/project", runId: "consolidation-a" };
 function message(stopReason = "stop"): any {
@@ -36,6 +37,7 @@ const stages = {
 	observer: (agentLoop: any) => runObserver({ ...base, priorReflections: [], priorObservations: [], chunk: "SECRET_PROMPT", allowedSourceEntryIds: ["source-a"], agentLoop }),
 	reflector: (agentLoop: any) => runReflector({ ...base, reflections: [], observations: [observation("aaaaaaaaaaaa")], agentLoop }),
 	dropper: (agentLoop: any) => runDropper({ ...base, reflections: [], observations: [observation("aaaaaaaaaaaa", { tokenCount: 10 }), observation("bbbbbbbbbbbb", { tokenCount: 10 })], targetTokens: 1, agentLoop }),
+	retirer: (agentLoop: any) => runRetirer({ ...base, reflections: [reflection("rrrrrrrrrrr1"), reflection("rrrrrrrrrrr2")], agentLoop }),
 };
 function logPath(): string { return join(mock.agentDir, "observational-memory", "usage", "session-a.ndjson"); }
 function rows(): any[] { return readFileSync(logPath(), "utf8").trim().split("\n").map((line) => JSON.parse(line)); }

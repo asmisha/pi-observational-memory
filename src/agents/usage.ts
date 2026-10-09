@@ -2,7 +2,7 @@ import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import { logUsage } from "../debug-log.js";
 
 /** Observe completed model calls without changing memory-agent execution. */
-export function createUsageTracker(stage: "observer" | "reflector" | "dropper"): (event: AgentEvent) => void {
+export function createUsageTracker(stage: "observer" | "reflector" | "dropper" | "retirer"): (event: AgentEvent) => void {
 	let startedAt: number | undefined;
 	return (event) => {
 		if (event.type === "turn_start") {

@@ -2985,7 +2985,9 @@ Retire the reflections that kept ones make duplicate or superseded. If none qual
     resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple)
   );
   let streamError;
+  const trackUsage = createUsageTracker("retirer");
   for await (const event of stream) {
+    trackUsage(event);
     logAgentStreamError("retirer", event);
     const message = event.message;
     if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {

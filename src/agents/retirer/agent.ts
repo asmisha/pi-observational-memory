@@ -5,6 +5,7 @@ import type { Static } from "typebox";
 import { debugLog } from "../../debug-log.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { logAgentStreamError } from "../stream-errors.js";
+import { createUsageTracker } from "../usage.js";
 import { resolveWorkerStreamSimple, type StreamableModelRegistry, type WorkerStreamSimple } from "../worker-stream.js";
 import { reflectionToSummaryLine, type Reflection } from "../../session-ledger/index.js";
 import { RETIRER_SYSTEM } from "./prompts.js";
@@ -172,7 +173,9 @@ export async function runRetirer(args: RunRetirerArgs): Promise<string[] | undef
 		resolveWorkerStreamSimple(model, args.modelRegistry, args.streamSimple),
 	);
 	let streamError: { stopReason: string; errorMessage?: string } | undefined;
+	const trackUsage = createUsageTracker("retirer");
 	for await (const event of stream) {
+		trackUsage(event);
 		logAgentStreamError("retirer", event);
 		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
 		if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {

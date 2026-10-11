@@ -34,7 +34,7 @@ describe("session-ledger V3 summary rendering", () => {
 		const summary = renderSummary([ref], []);
 
 		expect(summary).toContain("## Reflections\n[eeeeeeeeeeee] 2026-05-02 10:30 User prefers source-backed memory.");
-		expect(summary).toContain("When entries conflict, the most recent observation reflects the latest known state, and among reflections the most recently recorded one wins.");
+		expect(summary).toContain("the most recent observation reflects the latest known state, and among reflections the most recently recorded one wins.");
 	});
 
 	it("renders V3 observations with ids, timestamps, relevance, and content", () => {
@@ -80,10 +80,10 @@ describe("budgeted summary rendering", () => {
 	});
 
 	it("keeps all reflections and the newest observations that fit when reflections are small", () => {
-		// Fixed overhead ~297 tokens, each line ~38 tokens. Budget 522 leaves
+		// Fixed overhead ~375 tokens, each line ~38 tokens. Budget 600 leaves
 		// ~225: observations reserve half (2 lines), reflections take the rest
 		// (3 lines fit), observations reclaim nothing more.
-		const rendered = renderSummaryWithBudget(reflections, observations, { maxTokens: 522 });
+		const rendered = renderSummaryWithBudget(reflections, observations, { maxTokens: 600 });
 
 		expect(rendered.reflections).toHaveLength(3);
 		expect(rendered.observations.map((obs) => obs.id)).toEqual(["a3aaaaaaaaaa", "a4aaaaaaaaaa"]);
@@ -97,7 +97,7 @@ describe("budgeted summary rendering", () => {
 	it("guarantees observations at least half the budget when reflections are verbose", () => {
 		const verbose = ["e1", "e2", "e3", "e4", "e5", "e6"].map((id, i) => reflection(id.padEnd(12, "e"), ["aaaaaaaaaaaa"], { content: `Reflection ${i + 1} ${"r".repeat(400)}` }));
 		// ~225 tokens of lines: observations get >= 112 (2 lines), reflections the rest (1 line of ~105).
-		const rendered = renderSummaryWithBudget(verbose, observations, { maxTokens: 500 });
+		const rendered = renderSummaryWithBudget(verbose, observations, { maxTokens: 578 });
 
 		expect(rendered.observations.length).toBeGreaterThanOrEqual(2);
 		expect(rendered.observations.at(-1)?.id).toBe("a4aaaaaaaaaa");
@@ -109,7 +109,7 @@ describe("budgeted summary rendering", () => {
 
 	it("lets reflections use budget observations leave unused", () => {
 		const oneObservation = observations.slice(0, 1);
-		const rendered = renderSummaryWithBudget(reflections, oneObservation, { maxTokens: 500 });
+		const rendered = renderSummaryWithBudget(reflections, oneObservation, { maxTokens: 578 });
 
 		expect(rendered.observations).toHaveLength(1);
 		expect(rendered.reflections).toHaveLength(3);

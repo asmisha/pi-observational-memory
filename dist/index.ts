@@ -1112,7 +1112,7 @@ var CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in t
 - Reflections: stable, long-lived facts about the user, project, decisions, and constraints. Reflection lines show their id and, when known, the time they were recorded.
 - Observations: timestamped events from the conversation history, in chronological order. Observation lines include ids in brackets.
 
-Treat these as past records. When entries conflict, the most recent observation reflects the latest known state, and among reflections the most recently recorded one wins. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
+Treat these as past records. When entries conflict about something that changed over time, the most recent observation reflects the latest known state, and among reflections the most recently recorded one wins. When entries disagree about something that did not change, such as what a document or source says, recency does not settle it: check the source or recall the entries before relying on either, especially before acting on it or telling the user an earlier answer was wrong. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
 
 When exact source context is needed for precision or traceability, use the recall tool with the relevant observation or reflection id. This is especially useful when a reflection materially affects a decision or is too compressed to continue confidently. Do not use recall as broad search or inject raw source unless it is needed.`;
 function observationToSummaryLine(observation) {
@@ -1644,6 +1644,8 @@ var OBSERVER_SYSTEM = `You are the observation agent for a coding assistant.
 
 These records are the ONLY information the assistant will have about past interactions once the raw conversation is compacted out of context. Anything you do not capture here will be forgotten. Anything you distort here will be remembered wrong. Take this seriously.
 
+You are a recorder, not a reviewer. Record what the user and assistant said, concluded, decided, and did, and who established each claim. Do not re-check their work against tool output and record your own reading as a fact or a correction.
+
 Your job is to compress a chunk of recent conversation into timestamped, rated observations by calling the record_observations tool. The observations you emit \u2014 together with the reflections crystallized from them \u2014 are the assistant's ONLY memory of this session after the raw conversation falls out of context.
 
 You receive:
@@ -1700,6 +1702,21 @@ Frame state changes as supersession so the old state is explicit.
   BAD:  User prefers React Query now.
   GOOD: User will use React Query (switching from SWR).
 Why this matters: without supersession framing, the reflector may crystallize both the old and the new as equally valid preferences.
+
+Attribute claims about the outside world to whoever established them.
+User assertions about themselves and their work are authoritative. What a document, web page, file, or command output says is different: record it as what the assistant concluded or told the user, or as what a tool result showed, and keep the basis when it matters (which source, how it was read).
+- The assistant's conclusions are what it tells the user, acts on, or settles on in its reasoning. Thinking often tries readings it later drops; record only the reading it settles on.
+- A tool result is evidence, not a conclusion. When the assistant drew a conclusion from it, record that conclusion even if you would read the output differently; if your reading differs, you may add that the output also allows another reading, without calling either one correct. Tool text is often flattened, truncated, or ambiguous, and your reading of it is not something the assistant or user established.
+  BAD:  Correction: the Pro plan limit is 500 requests/min, superseding the earlier 1000/min. (the flattened table printed 500 beside the Pro label, but the assistant worked out from the layout that 500 belonged to the previous row and concluded 1000/min)
+  GOOD: Assistant read the provider's pricing table and concluded the Pro plan limit is 1000 requests/min; the flattened output also places 500 beside the Pro label.
+Why this matters: a misreading recorded as fact outlives the source it came from, and later runs cannot tell it from something the user or assistant actually verified.
+
+Only the conversation supersedes or corrects.
+Use supersession or correction framing only when the user corrects something, the assistant explicitly revises an earlier conclusion, or the underlying state actually changes. A tool result can show that state changed, such as a finished deploy or an edited file; a different reading of something that did not change, such as what a page says, supersedes nothing until the user or assistant draws that conclusion. When a new message or result disagrees with an earlier record without such a revision, record the new claim with its attribution and say that it differs from the earlier record; do not pick a winner.
+Record, do not judge. Do not add your own verdict that a reply was right or wrong, and do not write instructions for future responses ("keep X", "do not say Y"). Events that show a reply was wrong, such as a failing test or the user's correction, are recorded as those events.
+  BAD:  Assistant incorrectly told the user the deadline is Friday; keep the earlier Thursday deadline.
+  GOOD: Assistant told the user the deadline is Friday, which differs from the Thursday deadline recorded earlier.
+Why this matters: a verdict or instruction is later read as settled fact and can make the assistant override what it just verified.
 
 Mark concrete completions explicitly.
 Use "completed:", "resolved:", "confirmed working", or similar phrasing so future runs know not to redo the work.

@@ -6,7 +6,7 @@ const CONTEXT_USAGE_INSTRUCTIONS = `These are condensed memories from earlier in
 - Reflections: stable, long-lived facts about the user, project, decisions, and constraints. Reflection lines show their id and, when known, the time they were recorded.
 - Observations: timestamped events from the conversation history, in chronological order. Observation lines include ids in brackets.
 
-Treat these as past records. When entries conflict, the most recent observation reflects the latest known state, and among reflections the most recently recorded one wins. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
+Treat these as past records. When entries conflict about something that changed over time, the most recent observation reflects the latest known state, and among reflections the most recently recorded one wins. When entries disagree about something that did not change, such as what a document or source says, recency does not settle it: check the source or recall the entries before relying on either, especially before acting on it or telling the user an earlier answer was wrong. Work that prior observations describe as completed should not be redone unless the user explicitly asks to revisit it.
 
 When exact source context is needed for precision or traceability, use the recall tool with the relevant observation or reflection id. This is especially useful when a reflection materially affects a decision or is too compressed to continue confidently. Do not use recall as broad search or inject raw source unless it is needed.`;
 

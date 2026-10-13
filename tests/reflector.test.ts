@@ -103,6 +103,9 @@ describe("V3 reflector agent", () => {
 
 		expect(systemPrompt).toContain("Your task is different from the observer");
 		expect(systemPrompt).toContain("User assertions are authoritative");
+		expect(systemPrompt).toContain("Keep who said or decided what");
+		expect(systemPrompt).toContain("Never fold the assistant's reading, plan, or added condition into \"User decided ...\"");
+		expect(systemPrompt).toContain("An assistant observation counts as support only when the reflection keeps it as the assistant's");
 		expect(systemPrompt).toContain("supportingObservationIds");
 		expect(systemPrompt).toContain("coverage/provenance set");
 		expect(systemPrompt).toContain("Do not lightly reword existing reflections");

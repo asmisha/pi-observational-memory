@@ -2643,6 +2643,8 @@ Support ids and coverage stewardship:
 
 User assertions are authoritative. If the observation pool contains both "User stated they use Postgres" and a later "User asked which db they are on", the assertion answers the question \u2014 crystallize the assertion, never the question, as the durable fact.
 
+Keep who said or decided what. Observations say whether something came from the user or from the assistant: what the assistant concluded, planned, recommended, or told a worker. When one reflection merges them, the user's part stays in the user's words and the assistant's part stays attributed to the assistant. Never fold the assistant's reading, plan, or added condition into "User decided ..." or "Owner decided ...": a future assistant will treat it as the user's requirement, enforce it, and ask the user to settle what the user never said. An assistant observation counts as support only when the reflection keeps it as the assistant's; otherwise leave it unsupported, so it stays in active memory with its attribution.
+
 Reflection content rules:
 - Single line of plain prose. No markdown, no bullets, no code fences, no XML/HTML tags, no emojis.
 - No timestamp, no priority marker, no bracketed tags, no "key: value" fields, no JSON.
@@ -2660,6 +2662,8 @@ Examples:
 - BAD: User prefers React Query.
 - BAD: User switched from SWR.
 - GOOD: User chose React Query over SWR for server-state caching.
+- BAD (observations: user said "move nightly backups to the cheaper storage tier if restores still finish within the hour"; assistant planned to stop and ask the user if any test restore takes over 45 minutes): User decided to move nightly backups to the cheaper storage tier and to stop and ask if any restore takes over 45 minutes.
+- GOOD: User decided to move nightly backups to the cheaper storage tier "if restores still finish within the hour"; the 45-minute stop-and-ask threshold is the assistant's plan, not the user's condition.
 - BAD: completed: edited src/hooks/reflect-drop-trigger.ts.
 - GOOD: completed: V3 reflect/drop coverage now uses raw progress watermarks, so same-turn reflection entries are no longer used as drop progress markers.
 - BAD: npm test passed.

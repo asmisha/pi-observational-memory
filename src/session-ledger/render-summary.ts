@@ -29,7 +29,38 @@ export type RenderSummaryOptions = {
 	 * `/om:view full`.
 	 */
 	maxTokens?: number;
+	/**
+	 * The latest user message before the retained context, when compaction cut
+	 * it off. Rendered verbatim after the memory records so the agent keeps the
+	 * user's own words and file paths; observations only paraphrase them.
+	 */
+	latestUserMessage?: CutOffUserMessage;
 };
+
+export type CutOffUserMessage = {
+	entryId: string;
+	timestamp?: string;
+	text: string;
+};
+
+/** Token cap on the cut-off user message before it is truncated. */
+export const LATEST_USER_MESSAGE_MAX_TOKENS = 2_000;
+/** Share of the summary budget the cut-off user message may take before it is truncated. */
+export const LATEST_USER_MESSAGE_MAX_SHARE = 0.25;
+
+const LATEST_USER_MESSAGE_HEADING = `## Latest user message\nCompaction removed the user's most recent message before the context below. It is quoted exactly as written:`;
+
+function latestUserMessageSection(message: CutOffUserMessage, maxTokens: number | undefined): string {
+	let text = message.text;
+	if (maxTokens !== undefined) {
+		const maxChars = Math.max(0, maxTokens * 4);
+		if (text.length > maxChars) {
+			text = `${text.slice(0, maxChars)}\n[… ${(text.length - maxChars).toLocaleString()} more characters omitted to fit the summary budget; the full message is session entry ${message.entryId}]`;
+		}
+	}
+	const quoted = text.split("\n").map((line) => (line.length > 0 ? `> ${line}` : ">")).join("\n");
+	return `${LATEST_USER_MESSAGE_HEADING}\n${formatTimestamp(message.timestamp)}\n${quoted}`;
+}
 
 /** Share of the summary budget reserved for observations before reflections are allocated. */
 export const SUMMARY_OBSERVATIONS_MIN_SHARE = 0.5;
@@ -73,10 +104,18 @@ export function renderSummaryWithBudget(
 
 	let keptReflections = reflections;
 	let keptObservations = observations;
+	let latestUserMessage: string | undefined;
 	const maxTokens = options.maxTokens;
 	if (maxTokens !== undefined && Number.isFinite(maxTokens) && maxTokens > 0) {
 		const fixed = estimateTokens(CONTEXT_USAGE_INSTRUCTIONS) + estimateTokens("## Reflections\n## Observations\n\n\n\n") + 40;
-		const budget = Math.max(0, maxTokens - fixed);
+		let budget = Math.max(0, maxTokens - fixed);
+		// The user's own words come first: records describing earlier work can
+		// be recalled from the ledger, the cut-off request cannot.
+		if (options.latestUserMessage) {
+			const messageMaxTokens = Math.min(LATEST_USER_MESSAGE_MAX_TOKENS, Math.floor(budget * LATEST_USER_MESSAGE_MAX_SHARE));
+			latestUserMessage = latestUserMessageSection(options.latestUserMessage, messageMaxTokens);
+			budget = Math.max(0, budget - estimateTokens(latestUserMessage) - 2);
+		}
 		// Observations are the chronological record and must not be crowded out
 		// by verbose reflections: reserve them a share first, give reflections
 		// the remainder, then let observations reclaim whatever reflections left.
@@ -84,6 +123,8 @@ export function renderSummaryWithBudget(
 		const pickedReflections = selectWithinBudget(reflections, reflectionToSummaryLine, budget - reserved.tokens);
 		keptReflections = pickedReflections.kept;
 		keptObservations = selectWithinBudget(observations, observationToSummaryLine, budget - pickedReflections.tokens).kept;
+	} else if (options.latestUserMessage) {
+		latestUserMessage = latestUserMessageSection(options.latestUserMessage, undefined);
 	}
 
 	const omittedReflections = reflections.length - keptReflections.length;
@@ -101,6 +142,7 @@ export function renderSummaryWithBudget(
 		if (omittedObservations > 0) omitted.push(`${omittedObservations} older observation${omittedObservations === 1 ? "" : "s"}`);
 		parts.push(`(${omitted.join(" and ")} omitted to fit the summary budget; they remain in the session memory ledger, see /om:view full.)`);
 	}
+	if (latestUserMessage) parts.push(latestUserMessage);
 	return {
 		text: parts.join("\n\n"),
 		reflections: keptReflections,

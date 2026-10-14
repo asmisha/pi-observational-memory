@@ -21,6 +21,7 @@ import {
 	rawTokensAfterIndex,
 	renderSummaryWithBudget,
 	unobservedSourceSpanBefore,
+	type CutOffUserMessage,
 	type Entry,
 	type UnobservedSourceSpan,
 } from "../session-ledger/index.js";
@@ -56,6 +57,49 @@ function findCutPointAtOrBefore(entries: Entry[], index: number, startIndex: num
 		if (isCutPointEntry(entries[i])) return i;
 	}
 	return -1;
+}
+
+function contextMessages(entry: Entry): Array<{ role: string; content?: unknown }> {
+	if (entry.type === "compaction") return [];
+	try {
+		return sessionEntryToContextMessages(entry as unknown as SessionEntry) as Array<{ role: string; content?: unknown }>;
+	} catch {
+		return [];
+	}
+}
+
+function userMessageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((part: { type?: string; text?: unknown }) => {
+			if (part?.type === "text" && typeof part.text === "string") return part.text;
+			if (part?.type === "image") return "[image]";
+			return "";
+		})
+		.filter((text) => text.length > 0)
+		.join("\n");
+}
+
+/**
+ * The latest user message before `firstKeptEntryId` when the cut removes it,
+ * i.e. the kept context does not start with it. A cut inside a turn keeps the
+ * agent's later work on a request but drops the request itself; Pi's native
+ * summarizer covers this with a separate turn-prefix summary, while the memory
+ * summary would otherwise carry only the observer's paraphrase of it.
+ */
+export function cutOffUserMessage(entries: Entry[], firstKeptEntryId: string): CutOffUserMessage | undefined {
+	const cutIndex = entryIndexForId(entries, firstKeptEntryId);
+	if (cutIndex <= 0) return undefined;
+	if (contextMessages(entries[cutIndex]).some((message) => message.role === "user")) return undefined;
+	for (let i = cutIndex - 1; i >= 0; i--) {
+		const message = contextMessages(entries[i]).find((candidate) => candidate.role === "user");
+		if (!message) continue;
+		const text = userMessageText(message.content);
+		if (text.length === 0) return undefined;
+		return { entryId: entries[i].id, timestamp: entries[i].timestamp, text };
+	}
+	return undefined;
 }
 
 export type CompactionCut = {
@@ -200,7 +244,10 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 			resolution.cut.foldThroughEntryId,
 			{ observationsPoolMaxTokens: observationsPoolMaxTokens(runtime) },
 		);
-		const rendered = renderSummaryWithBudget(projection.reflections, projection.observations, { maxTokens: summaryMaxTokens });
+		const rendered = renderSummaryWithBudget(projection.reflections, projection.observations, {
+			maxTokens: summaryMaxTokens,
+			latestUserMessage: cutOffUserMessage(entries, resolution.cut.firstKeptEntryId),
+		});
 		summary = rendered.text;
 		// A summary that kept no record would replace older context with only
 		// instructions and an omission notice. Decline instead, so Pi's native

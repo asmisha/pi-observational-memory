@@ -1121,6 +1121,24 @@ function observationToSummaryLine(observation) {
 function reflectionToSummaryLine(reflection) {
   return reflection.recordedAt ? `[${reflection.id}] ${formatTimestamp(reflection.recordedAt)} ${reflection.content}` : `[${reflection.id}] ${reflection.content}`;
 }
+var LATEST_USER_MESSAGE_MAX_TOKENS = 2e3;
+var LATEST_USER_MESSAGE_MAX_SHARE = 0.25;
+var LATEST_USER_MESSAGE_HEADING = `## Latest user message
+Compaction removed the user's most recent message before the context below. It is quoted exactly as written:`;
+function latestUserMessageSection(message, maxTokens) {
+  let text = message.text;
+  if (maxTokens !== void 0) {
+    const maxChars = Math.max(0, maxTokens * 4);
+    if (text.length > maxChars) {
+      text = `${text.slice(0, maxChars)}
+[\u2026 ${(text.length - maxChars).toLocaleString()} more characters omitted to fit the summary budget; the full message is session entry ${message.entryId}]`;
+    }
+  }
+  const quoted = text.split("\n").map((line) => line.length > 0 ? `> ${line}` : ">").join("\n");
+  return `${LATEST_USER_MESSAGE_HEADING}
+${formatTimestamp(message.timestamp)}
+${quoted}`;
+}
 var SUMMARY_OBSERVATIONS_MIN_SHARE = 0.5;
 function estimateTokens(text) {
   return Math.ceil(text.length / 4);
@@ -1143,14 +1161,22 @@ function renderSummaryWithBudget(reflections, observations, options = {}) {
   }
   let keptReflections = reflections;
   let keptObservations = observations;
+  let latestUserMessage;
   const maxTokens = options.maxTokens;
   if (maxTokens !== void 0 && Number.isFinite(maxTokens) && maxTokens > 0) {
     const fixed = estimateTokens(CONTEXT_USAGE_INSTRUCTIONS) + estimateTokens("## Reflections\n## Observations\n\n\n\n") + 40;
-    const budget = Math.max(0, maxTokens - fixed);
+    let budget = Math.max(0, maxTokens - fixed);
+    if (options.latestUserMessage) {
+      const messageMaxTokens = Math.min(LATEST_USER_MESSAGE_MAX_TOKENS, Math.floor(budget * LATEST_USER_MESSAGE_MAX_SHARE));
+      latestUserMessage = latestUserMessageSection(options.latestUserMessage, messageMaxTokens);
+      budget = Math.max(0, budget - estimateTokens(latestUserMessage) - 2);
+    }
     const reserved = selectWithinBudget(observations, observationToSummaryLine, Math.floor(budget * SUMMARY_OBSERVATIONS_MIN_SHARE));
     const pickedReflections = selectWithinBudget(reflections, reflectionToSummaryLine, budget - reserved.tokens);
     keptReflections = pickedReflections.kept;
     keptObservations = selectWithinBudget(observations, observationToSummaryLine, budget - pickedReflections.tokens).kept;
+  } else if (options.latestUserMessage) {
+    latestUserMessage = latestUserMessageSection(options.latestUserMessage, void 0);
   }
   const omittedReflections = reflections.length - keptReflections.length;
   const omittedObservations = observations.length - keptObservations.length;
@@ -1169,6 +1195,7 @@ ${keptObservations.map(observationToSummaryLine).join("\n")}`);
     if (omittedObservations > 0) omitted.push(`${omittedObservations} older observation${omittedObservations === 1 ? "" : "s"}`);
     parts.push(`(${omitted.join(" and ")} omitted to fit the summary budget; they remain in the session memory ledger, see /om:view full.)`);
   }
+  if (latestUserMessage) parts.push(latestUserMessage);
   return {
     text: parts.join("\n\n"),
     reflections: keptReflections,
@@ -2043,6 +2070,36 @@ function findCutPointAtOrBefore(entries, index, startIndex) {
   }
   return -1;
 }
+function contextMessages(entry) {
+  if (entry.type === "compaction") return [];
+  try {
+    return sessionEntryToContextMessages(entry);
+  } catch {
+    return [];
+  }
+}
+function userMessageText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    if (part?.type === "text" && typeof part.text === "string") return part.text;
+    if (part?.type === "image") return "[image]";
+    return "";
+  }).filter((text) => text.length > 0).join("\n");
+}
+function cutOffUserMessage(entries, firstKeptEntryId) {
+  const cutIndex = entryIndexForId(entries, firstKeptEntryId);
+  if (cutIndex <= 0) return void 0;
+  if (contextMessages(entries[cutIndex]).some((message) => message.role === "user")) return void 0;
+  for (let i = cutIndex - 1; i >= 0; i--) {
+    const message = contextMessages(entries[i]).find((candidate) => candidate.role === "user");
+    if (!message) continue;
+    const text = userMessageText(message.content);
+    if (text.length === 0) return void 0;
+    return { entryId: entries[i].id, timestamp: entries[i].timestamp, text };
+  }
+  return void 0;
+}
 function resolveCompactionCut(entries, firstKeptEntryId, options) {
   const cutIndex = entryIndexForId(entries, firstKeptEntryId);
   if (cutIndex === -1) return { kind: "cut", cut: { firstKeptEntryId, foldThroughEntryId: firstKeptEntryId } };
@@ -2126,7 +2183,10 @@ async function handleCompaction(pi, event, ctx, runtime) {
       resolution.cut.foldThroughEntryId,
       { observationsPoolMaxTokens: observationsPoolMaxTokens(runtime) }
     );
-    const rendered = renderSummaryWithBudget(projection.reflections, projection.observations, { maxTokens: summaryMaxTokens });
+    const rendered = renderSummaryWithBudget(projection.reflections, projection.observations, {
+      maxTokens: summaryMaxTokens,
+      latestUserMessage: cutOffUserMessage(entries, resolution.cut.firstKeptEntryId)
+    });
     summary = rendered.text;
     const hadRecords = projection.reflections.length + projection.observations.length > 0;
     if (hadRecords && rendered.reflections.length + rendered.observations.length === 0) {

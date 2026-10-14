@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { registerCompactionHook, resolveCompactionCut } from "../src/hooks/compaction-hook.js";
+import { cutOffUserMessage, registerCompactionHook, resolveCompactionCut } from "../src/hooks/compaction-hook.js";
 import {
 	compactionEntry,
 	observation,
@@ -320,5 +320,68 @@ describe("budgeted summary with no record (PR #81 review, issue 3)", () => {
 			"Observational memory: no memory record fits the ~500-token summary budget; delegating to Pi's native summarizer",
 			"warning",
 		);
+	});
+});
+
+describe("compaction hook when the cut removes the user's latest message", () => {
+	const request = "как правильно отправить эти документы?\n\nФайл (photo): /tmp/attachments/52234/photo.jpg";
+
+	it("quotes the message verbatim when Pi cuts inside its turn", async () => {
+		const entries = [
+			userMessage("u0", request),
+			assistantMessage("a0"),
+			toolResultMessage("t0"),
+			assistantMessage("a1"),
+			toolResultMessage("t1"),
+			coverage("om-t0", "t0", "aaaaaaaaaaaa"),
+		];
+		const { run } = setup({ entries });
+
+		const result = await run("a1") as any;
+
+		expect(result.compaction.firstKeptEntryId).toBe("a1");
+		expect(result.compaction.summary).toContain("## Latest user message");
+		expect(result.compaction.summary).toContain("> Файл (photo): /tmp/attachments/52234/photo.jpg");
+	});
+
+	it("quotes the message for the cut the hook moved back, not only Pi's proposal", async () => {
+		const entries = [
+			userMessage("u0", request),
+			assistantMessage("a0"),
+			toolResultMessage("t0"),
+			assistantMessage("a1"),
+			toolResultMessage("t1"),
+			assistantMessage("a2"),
+			toolResultMessage("t2"),
+			coverage("om-t0", "t0", "aaaaaaaaaaaa"),
+		];
+		const { run } = setup({ entries });
+
+		const result = await run("a2") as any;
+
+		expect(result.compaction.firstKeptEntryId).toBe("a1");
+		expect(result.compaction.summary).toContain("> как правильно отправить эти документы?");
+	});
+
+	it("adds nothing when the kept context starts with the user message", async () => {
+		const entries = [...laggingBranch(), coverage("om-a2", "a2", "cccccccccccc")];
+		const { run } = setup({ entries });
+
+		const result = await run("u2") as any;
+
+		expect(result.compaction.summary).not.toContain("## Latest user message");
+	});
+
+	it("finds a message that an earlier compaction already cut off", () => {
+		const entries = [
+			userMessage("u0", request),
+			assistantMessage("a0"),
+			compactionEntry("cmp-1", { firstKeptEntryId: "a0" }),
+			assistantMessage("a1"),
+			toolResultMessage("t1"),
+			assistantMessage("a2"),
+		];
+
+		expect(cutOffUserMessage(entries as any, "a2")).toMatchObject({ entryId: "u0", text: request });
 	});
 });

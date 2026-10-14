@@ -132,3 +132,43 @@ describe("oversized newest record (PR #81 review, issue 3)", () => {
 		expect(rendered.text).toContain("Short older fact.");
 	});
 });
+
+describe("latest user message cut off by compaction", () => {
+	const request = {
+		entryId: "u-request",
+		timestamp: "2026-05-02T10:00:00.000Z",
+		text: "Mikhail: как правильно отправить эти документы?\n\nФайл (photo): /tmp/attachments/52234/photo.jpg",
+	};
+	const facts = ["a1", "a2", "a3", "a4"].map((id, i) => observation(id.padEnd(12, "a"), { content: `Observation ${i + 1} ${"o".repeat(120)}` }));
+
+	it("quotes the message verbatim after the memory records", () => {
+		const text = renderSummary([], facts, { latestUserMessage: request });
+
+		expect(text).toContain("## Latest user message");
+		expect(text).toContain("> Mikhail: как правильно отправить эти документы?\n>\n> Файл (photo): /tmp/attachments/52234/photo.jpg");
+		expect(text.indexOf("## Latest user message")).toBeGreaterThan(text.indexOf("## Observations"));
+	});
+
+	it("takes its share of the budget before records, so older records give way", () => {
+		const without = renderSummaryWithBudget([], facts, { maxTokens: 600 });
+		const withMessage = renderSummaryWithBudget([], facts, { maxTokens: 600, latestUserMessage: request });
+
+		expect(withMessage.text).toContain("/tmp/attachments/52234/photo.jpg");
+		expect(withMessage.observations.length).toBeLessThan(without.observations.length);
+		expect(withMessage.observations.at(-1)?.id).toBe("a4aaaaaaaaaa");
+	});
+
+	it("truncates a long message to its budget share and points at the session entry", () => {
+		const long = { ...request, text: `${"x".repeat(20_000)}TAIL` };
+
+		const rendered = renderSummaryWithBudget([], facts, { maxTokens: 2_000, latestUserMessage: long });
+
+		expect(rendered.text).not.toContain("TAIL");
+		expect(rendered.text).toContain("more characters omitted to fit the summary budget; the full message is session entry u-request");
+		expect(rendered.observations.length).toBeGreaterThan(0);
+	});
+
+	it("renders nothing without memory records, so the hook still delegates", () => {
+		expect(renderSummaryWithBudget([], [], { latestUserMessage: request }).text).toBe("");
+	});
+});

@@ -224,7 +224,7 @@ It does only deterministic work:
 2. Load config if needed.
 3. Read `event.preparation.firstKeptEntryId` and `event.preparation.tokensBefore`.
 4. Build a compaction projection from branch entries and `firstKeptEntryId`.
-5. Render a summary from projected reflections and observations. When the cut removes the latest user message but keeps later context, as a cut inside a long turn does, quote that message verbatim at the end of the summary: Pi's native summarizer summarizes a split turn's prefix separately, and observations alone would keep only a paraphrase of the request and none of its file paths.
+5. Render a summary from projected reflections and observations. If the cut drops the user's latest message but keeps the work after it, as happens when the cut falls inside a long turn, quote that message word for word at the end of the summary. Pi's native summarizer covers this case with a separate summary of the turn's start. Without the quote, the summary would hold only the observer's paraphrase of the request, without its file paths.
 6. If the summary is empty, return no extension result so Pi uses native compaction.
 7. Otherwise return `{ compaction: { summary, firstKeptEntryId, tokensBefore, details } }` where `details.type` is `om.folded`.
 

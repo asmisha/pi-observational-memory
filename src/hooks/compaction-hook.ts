@@ -82,11 +82,11 @@ function userMessageText(content: unknown): string {
 }
 
 /**
- * The latest user message before `firstKeptEntryId` when the cut removes it,
- * i.e. the kept context does not start with it. A cut inside a turn keeps the
- * agent's later work on a request but drops the request itself; Pi's native
- * summarizer covers this with a separate turn-prefix summary, while the memory
- * summary would otherwise carry only the observer's paraphrase of it.
+ * The user's latest message before `firstKeptEntryId`, if the cut leaves it
+ * out (the kept context doesn't start with it). A cut inside a turn keeps the
+ * agent's work on a request but drops the request. Pi's native summarizer
+ * covers this with a separate summary of the turn's start; without this, the
+ * memory summary would hold only the observer's paraphrase of the request.
  */
 export function cutOffUserMessage(entries: Entry[], firstKeptEntryId: string): CutOffUserMessage | undefined {
 	const cutIndex = entryIndexForId(entries, firstKeptEntryId);

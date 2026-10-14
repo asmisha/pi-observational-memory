@@ -30,9 +30,9 @@ export type RenderSummaryOptions = {
 	 */
 	maxTokens?: number;
 	/**
-	 * The latest user message before the retained context, when compaction cut
-	 * it off. Rendered verbatim after the memory records so the agent keeps the
-	 * user's own words and file paths; observations only paraphrase them.
+	 * The user's latest message, if compaction cut it off. It is quoted word for
+	 * word after the memory records so the agent keeps the user's wording and
+	 * file paths, which observations only paraphrase.
 	 */
 	latestUserMessage?: CutOffUserMessage;
 };
@@ -43,19 +43,19 @@ export type CutOffUserMessage = {
 	text: string;
 };
 
-/** Token cap on the cut-off user message before it is truncated. */
+/** Most tokens the quoted user message may use before it is cut short. */
 export const LATEST_USER_MESSAGE_MAX_TOKENS = 2_000;
-/** Share of the summary budget the cut-off user message may take before it is truncated. */
+/** Largest share of the summary budget the quoted user message may use before it is cut short. */
 export const LATEST_USER_MESSAGE_MAX_SHARE = 0.25;
 
-const LATEST_USER_MESSAGE_HEADING = `## Latest user message\nCompaction removed the user's most recent message before the context below. It is quoted exactly as written:`;
+const LATEST_USER_MESSAGE_HEADING = `## Latest user message\nThis is the user's latest message before the context below. Compaction removed it from context, so it is quoted here word for word:`;
 
 function latestUserMessageSection(message: CutOffUserMessage, maxTokens: number | undefined): string {
 	let text = message.text;
 	if (maxTokens !== undefined) {
 		const maxChars = Math.max(0, maxTokens * 4);
 		if (text.length > maxChars) {
-			text = `${text.slice(0, maxChars)}\n[… ${(text.length - maxChars).toLocaleString()} more characters omitted to fit the summary budget; the full message is session entry ${message.entryId}]`;
+			text = `${text.slice(0, maxChars)}\n[… ${(text.length - maxChars).toLocaleString()} more characters cut to fit the summary budget; the full message is in session entry ${message.entryId}]`;
 		}
 	}
 	const quoted = text.split("\n").map((line) => (line.length > 0 ? `> ${line}` : ">")).join("\n");
@@ -109,8 +109,8 @@ export function renderSummaryWithBudget(
 	if (maxTokens !== undefined && Number.isFinite(maxTokens) && maxTokens > 0) {
 		const fixed = estimateTokens(CONTEXT_USAGE_INSTRUCTIONS) + estimateTokens("## Reflections\n## Observations\n\n\n\n") + 40;
 		let budget = Math.max(0, maxTokens - fixed);
-		// The user's own words come first: records describing earlier work can
-		// be recalled from the ledger, the cut-off request cannot.
+		// Quote the user's words first. Records about earlier work can be
+		// recalled from the ledger; the cut-off request can't.
 		if (options.latestUserMessage) {
 			const messageMaxTokens = Math.min(LATEST_USER_MESSAGE_MAX_TOKENS, Math.floor(budget * LATEST_USER_MESSAGE_MAX_SHARE));
 			latestUserMessage = latestUserMessageSection(options.latestUserMessage, messageMaxTokens);

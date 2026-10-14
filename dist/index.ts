@@ -1124,14 +1124,14 @@ function reflectionToSummaryLine(reflection) {
 var LATEST_USER_MESSAGE_MAX_TOKENS = 2e3;
 var LATEST_USER_MESSAGE_MAX_SHARE = 0.25;
 var LATEST_USER_MESSAGE_HEADING = `## Latest user message
-Compaction removed the user's most recent message before the context below. It is quoted exactly as written:`;
+This is the user's latest message before the context below. Compaction removed it from context, so it is quoted here word for word:`;
 function latestUserMessageSection(message, maxTokens) {
   let text = message.text;
   if (maxTokens !== void 0) {
     const maxChars = Math.max(0, maxTokens * 4);
     if (text.length > maxChars) {
       text = `${text.slice(0, maxChars)}
-[\u2026 ${(text.length - maxChars).toLocaleString()} more characters omitted to fit the summary budget; the full message is session entry ${message.entryId}]`;
+[\u2026 ${(text.length - maxChars).toLocaleString()} more characters cut to fit the summary budget; the full message is in session entry ${message.entryId}]`;
     }
   }
   const quoted = text.split("\n").map((line) => line.length > 0 ? `> ${line}` : ">").join("\n");

@@ -164,7 +164,7 @@ describe("latest user message cut off by compaction", () => {
 		const rendered = renderSummaryWithBudget([], facts, { maxTokens: 2_000, latestUserMessage: long });
 
 		expect(rendered.text).not.toContain("TAIL");
-		expect(rendered.text).toContain("more characters omitted to fit the summary budget; the full message is session entry u-request");
+		expect(rendered.text).toContain("more characters cut to fit the summary budget; the full message is in session entry u-request");
 		expect(rendered.observations.length).toBeGreaterThan(0);
 	});
 

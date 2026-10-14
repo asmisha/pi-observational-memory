@@ -86,6 +86,7 @@ var DEFAULTS = {
   compactAfterTokens: 81e3,
   compactAfterTokensMode: "calibrated",
   compactAfterTokensRatio: 0.68,
+  compactAtPiThresholdRatio: 0.7,
   observationsPoolMaxTokens: 2e4,
   observationsPoolTargetTokens: 1e4,
   reflectionsPoolMaxTokens: 1e4,
@@ -216,6 +217,8 @@ function normalizeSettingsConfig(value) {
   }
   const ratio = validRatioOrUndefined(value.compactAfterTokensRatio);
   if (ratio !== void 0) normalized.compactAfterTokensRatio = ratio;
+  const piThresholdRatio = validRatioOrUndefined(value.compactAtPiThresholdRatio);
+  if (piThresholdRatio !== void 0) normalized.compactAtPiThresholdRatio = piThresholdRatio;
   if (typeof value.consolidateWhenIdle === "boolean") normalized.consolidateWhenIdle = value.consolidateWhenIdle;
   if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
   if (typeof value.passive === "boolean") normalized.passive = value.passive;
@@ -280,6 +283,9 @@ function loadConfig(cwd, env = process.env) {
     piAutoCompactionEnabled
   };
 }
+
+// src/context-pressure.ts
+import { getAgentDir as getAgentDir2, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 // src/session-ledger/types.ts
 var OM_OBSERVATIONS_RECORDED = "om.observations.recorded";
@@ -1211,6 +1217,38 @@ function boundWorkerMemory(reflections, observations, maxTokens, options = {}) {
   };
 }
 
+// src/context-pressure.ts
+function piCompactionSettings(runtime, ctx) {
+  const model = ctx.model;
+  if (typeof model?.provider !== "string" || typeof model.id !== "string") return void 0;
+  if (!runtime.piSettings) {
+    const settings = SettingsManager.create(ctx.cwd, getAgentDir2(), { projectTrusted: ctx.isProjectTrusted?.() ?? true });
+    if (settings.drainErrors().length > 0) return void 0;
+    runtime.piSettings = settings;
+  }
+  return runtime.piSettings.getCompactionSettings({ provider: model.provider, id: model.id });
+}
+function contextPressure(runtime, ctx, entries) {
+  const usage = ctx.getContextUsage?.();
+  if (!usage || !(usage.contextWindow > 0)) return void 0;
+  const settings = piCompactionSettings(runtime, ctx);
+  if (!settings?.enabled) return void 0;
+  const piThresholdTokens = usage.contextWindow - settings.reserveTokens;
+  if (piThresholdTokens <= 0) return void 0;
+  const triggerTokens = Math.floor(piThresholdTokens * runtime.config.compactAtPiThresholdRatio);
+  const compactionIndex = findLastCompactionIndex(entries);
+  const postCompactionTokens = compactionIndex === -1 ? void 0 : realContextTokensAfterCompaction(entries, compactionIndex);
+  const heldByPostCompactionTokens = postCompactionTokens !== void 0 && postCompactionTokens >= triggerTokens ? postCompactionTokens : void 0;
+  const due = usage.tokens !== null && usage.tokens >= triggerTokens && heldByPostCompactionTokens === void 0;
+  return {
+    tokens: usage.tokens,
+    piThresholdTokens,
+    triggerTokens,
+    ...heldByPostCompactionTokens === void 0 ? {} : { heldByPostCompactionTokens },
+    due
+  };
+}
+
 // src/hooks/compaction-trigger.ts
 function compactionProgress(runtime, entries) {
   return runtime.config.piAutoCompactionEnabled === false ? rawTokensSinceLastCompaction(entries) : observedTokensSinceLastCompaction(entries);
@@ -1221,6 +1259,18 @@ function progressLabel(runtime) {
 function registerCompactionTrigger(pi, runtime) {
   pi.on("agent_settled", (_event, ctx) => maybeTriggerCompaction(runtime, ctx));
 }
+function compactionDueReason(runtime, ctx, entries, threshold) {
+  const progress = compactionProgress(runtime, entries);
+  if (progress >= threshold) {
+    return `compaction threshold reached (~${progress.toLocaleString()} ${progressLabel(runtime)} source tokens)`;
+  }
+  const pressure = contextPressure(runtime, ctx, entries);
+  if (pressure?.due && pressure.tokens !== null) {
+    const percent = Math.round(runtime.config.compactAtPiThresholdRatio * 100);
+    return `context reached ~${pressure.tokens.toLocaleString()} tokens, ${percent}% of Pi's ${pressure.piThresholdTokens.toLocaleString()}-token compaction threshold`;
+  }
+  return void 0;
+}
 function maybeTriggerCompaction(runtime, ctx) {
   {
     runtime.ensureConfig(ctx.cwd);
@@ -1228,16 +1278,13 @@ function maybeTriggerCompaction(runtime, ctx) {
     if (runtime.compactInFlight) return;
     const entries = ctx.sessionManager?.getBranch?.();
     if (!entries) return;
-    const progress = compactionProgress(runtime, entries);
     const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
     const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
-    if (progress < threshold) return;
+    const reason = compactionDueReason(runtime, ctx, entries, threshold);
+    if (reason === void 0) return;
     const hasUI = ctx.hasUI;
     const ui = ctx.ui;
-    if (hasUI) ui?.notify(
-      `Observational memory: compaction threshold reached (~${progress.toLocaleString()} ${progressLabel(runtime)} source tokens); triggering compaction`,
-      "info"
-    );
+    if (hasUI) ui?.notify(`Observational memory: ${reason}; triggering compaction`, "info");
     runtime.compactInFlight = true;
     setTimeout(() => {
       try {
@@ -1254,8 +1301,7 @@ function maybeTriggerCompaction(runtime, ctx) {
           runtime.compactInFlight = false;
           return;
         }
-        const currentProgress = compactionProgress(runtime, currentEntries);
-        if (currentProgress < threshold) {
+        if (compactionDueReason(runtime, ctx, currentEntries, threshold) === void 0) {
           runtime.compactInFlight = false;
           if (hasUI) ui?.notify(
             "Observational memory: compaction skipped \u2014 another compaction already ran before deferred compaction",
@@ -1302,6 +1348,15 @@ function appendSuffixes(line, suffixes) {
   const rendered = suffixes.filter((suffix) => suffix !== void 0);
   return rendered.length > 0 ? `${line} ${rendered.join(" ")}` : line;
 }
+function contextPressureLine(pressure, ratio) {
+  const trigger = pressure.triggerTokens.toLocaleString();
+  const piThreshold = pressure.piThresholdTokens.toLocaleString();
+  const current = pressure.tokens === null ? `unknown until the next response / ${trigger} tokens` : `~${pressure.tokens.toLocaleString()} / ${trigger} tokens (${pct(pressure.tokens, pressure.triggerTokens)}%)`;
+  if (pressure.heldByPostCompactionTokens !== void 0) {
+    return `Context pressure: ${current}; waiting for Pi's ${piThreshold}-token threshold: the first response after the latest compaction already used ~${pressure.heldByPostCompactionTokens.toLocaleString()} tokens`;
+  }
+  return `Context pressure: ${current}; compacts when idle at ${Math.round(ratio * 100)}% of Pi's ${piThreshold}-token threshold`;
+}
 function registerStatusCommand(pi, runtime) {
   pi.registerCommand("om:status", {
     description: "Show observational memory status",
@@ -1335,6 +1390,7 @@ function registerStatusCommand(pi, runtime) {
       const unobservedSinceCompaction = Math.max(0, rawTokensSinceLastCompaction(entries) - observedTokensSinceLastCompaction(entries));
       const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : void 0;
       const compactThreshold = resolveCompactAfterTokens(runtime.config, contextWindow);
+      const pressure = runtime.config.passive === true ? void 0 : contextPressure(runtime, ctx, entries);
       const passiveLines = runtime.config.passive === true ? [
         "\u2500\u2500 Mode \u2500\u2500",
         "Passive: automatic memory workers and auto-compaction disabled; manual/Pi compaction, commands, and recall remain active",
@@ -1350,6 +1406,7 @@ function registerStatusCommand(pi, runtime) {
         `Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
         `Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} observed tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
         `Next compaction:  ~${compactionProgress2.toLocaleString()} / ${compactThreshold.toLocaleString()} ${progressLabel(runtime)} source tokens (${pct(compactionProgress2, compactThreshold)}%)`,
+        ...pressure ? [contextPressureLine(pressure, runtime.config.compactAtPiThresholdRatio)] : [],
         `Observer backlog: ~${unobservedSinceCompaction.toLocaleString()} unobserved source tokens since the compaction boundary`,
         `Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
         `Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
@@ -1487,7 +1544,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync as existsSync2, mkdirSync, renameSync, statSync, unlinkSync, appendFileSync } from "node:fs";
 import { dirname, join as join2 } from "node:path";
-import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
+import { getAgentDir as getAgentDir3 } from "@earendil-works/pi-coding-agent";
 var DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024;
 var DEBUG_LOG_RELATIVE_PATH = join2("observational-memory", "debug.ndjson");
 var DEBUG_LOG_SESSION_DIR_RELATIVE_PATH = join2("observational-memory", "debug");
@@ -1511,7 +1568,7 @@ function debugLog(event, data = {}) {
   const context = storage.getStore();
   if (context?.enabled !== true) return;
   try {
-    const path = join2(getAgentDir2(), debugLogRelativePath(context));
+    const path = join2(getAgentDir3(), debugLogRelativePath(context));
     mkdirSync(dirname(path), { recursive: true });
     rotateIfNeeded(path);
     const payload = {
@@ -1533,7 +1590,7 @@ function logUsage(data) {
   if (!context) return;
   try {
     const sessionId = safeDebugLogSessionId(context.sessionId) ?? "unattributed";
-    const path = join2(getAgentDir2(), "observational-memory", "usage", `${sessionId}.ndjson`);
+    const path = join2(getAgentDir3(), "observational-memory", "usage", `${sessionId}.ndjson`);
     mkdirSync(dirname(path), { recursive: true, mode: 448 });
     rotateIfNeeded(path);
     appendFileSync(path, `${JSON.stringify({
@@ -3649,6 +3706,8 @@ function hasConfiguredProviderCredential(registry, model) {
 var Runtime = class {
   config = { ...DEFAULTS };
   configLoaded = false;
+  /** Pi's settings, loaded on first use to resolve its per-model compaction threshold. */
+  piSettings;
   consolidationInFlight = false;
   consolidationPromise = null;
   consolidationPhase;

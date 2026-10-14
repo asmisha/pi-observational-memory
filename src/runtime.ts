@@ -1,3 +1,4 @@
+import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { type Config, type ConfiguredModel, DEFAULTS, loadConfig } from "./config.js";
 import { debugLog } from "./debug-log.js";
 
@@ -110,6 +111,8 @@ export interface LaunchCtx {
 export class Runtime {
 	config: Config = { ...DEFAULTS };
 	configLoaded = false;
+	/** Pi's settings, loaded on first use to resolve its per-model compaction threshold. */
+	piSettings: Pick<SettingsManager, "getCompactionSettings"> | undefined;
 	consolidationInFlight = false;
 	consolidationPromise: Promise<void> | null = null;
 	consolidationPhase: ConsolidationPhase | undefined;

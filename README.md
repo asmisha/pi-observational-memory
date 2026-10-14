@@ -284,6 +284,14 @@ the active model's `contextWindow` is unavailable (undefined, 0, or negative),
 so compaction still triggers safely. `/om:status` shows the resolved threshold
 on the `Next compaction` line regardless of mode.
 
+### Compacting before Pi's own threshold
+
+Pi compacts when context exceeds `contextWindow - compaction.reserveTokens`, and
+it checks between model calls, so a long run can be compacted part-way through.
+To give the next run room, an idle session also compacts once Pi's reported
+context reaches `compactAtPiThresholdRatio` (default `0.7`) of that threshold.
+See [`compactAtPiThresholdRatio`](docs/configuration.md#compactatpithresholdratio).
+
 ### Defaults
 
 | Setting                     | Default       | Meaning                                                                                           |
@@ -295,6 +303,7 @@ on the `Next compaction` line regardless of mode.
 | `compactionMaxRetainedTokens` | derived     | Max estimated source tokens the compaction hook keeps in context when it retains entries the observer has not reached yet. Unset: half of the session model's context window, or `60000` when unknown. |
 | `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the source-entry threshold by the active model's `contextWindow`. |
 | `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Tunable because large windows do not always mean strong long-range attention. Must be in `(0, 1)`. |
+| `compactAtPiThresholdRatio` | `0.7`         | Idle sessions compact when Pi's reported context reaches this fraction of Pi's compaction threshold (`contextWindow - reserveTokens`). Must be in `(0, 1)`. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
 | `reflectionsPoolMaxTokens`  | `10000`       | Active-reflection tokens at which the retirer runs after a reflector pass that recorded new reflections. The retirer only removes duplicate or superseded reflections, so the pool can stay above it. |
@@ -368,7 +377,7 @@ flowchart TD
 
     Turn -->|observation due| Observe
     Turn -->|reflection due| Reflect
-    AgentSettled -->|compactAfterTokens and idle| Trigger --> Compact --> Summary
+    AgentSettled -->|compactAfterTokens or context pressure, and idle| Trigger --> Compact --> Summary
 ```
 
 The high-level lifecycle:

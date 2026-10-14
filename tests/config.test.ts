@@ -41,6 +41,7 @@ describe("V3 config", () => {
 			compactAfterTokens: 81000,
 			compactAfterTokensMode: "calibrated",
 			compactAfterTokensRatio: 0.68,
+			compactAtPiThresholdRatio: 0.7,
 			observationsPoolMaxTokens: 20000,
 			observationsPoolTargetTokens: 10000,
 			reflectionsPoolMaxTokens: 10000,
@@ -263,6 +264,20 @@ describe("V3 config", () => {
 				},
 			});
 			expect(loadConfig(cwd, {})).toMatchObject({ compactAfterTokensRatio: 0.68 });
+		});
+
+		it("accepts compactAtPiThresholdRatio only inside (0, 1)", () => {
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": { compactAtPiThresholdRatio: 0.85 },
+			});
+			expect(loadConfig(cwd, {})).toMatchObject({ compactAtPiThresholdRatio: 0.85 });
+
+			for (const invalid of [0, 1, 1.5, "0.5"]) {
+				writeJson(join(cwd, ".pi", "settings.json"), {
+					"observational-memory": { compactAtPiThresholdRatio: invalid },
+				});
+				expect(loadConfig(cwd, {})).toMatchObject({ compactAtPiThresholdRatio: 0.7 });
+			}
 		});
 
 		it("rejects non-numeric ratio and falls back to default", () => {

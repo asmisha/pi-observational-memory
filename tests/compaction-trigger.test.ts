@@ -1,3 +1,6 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { registerCompactionTrigger } from "../src/hooks/compaction-trigger.js";
@@ -10,7 +13,7 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
-function captureHandler(args: { compactAfterTokens?: number; compactAfterTokensMode?: "calibrated" | "ratio"; compactAfterTokensRatio?: number; passive?: boolean; compactInFlight?: boolean; piAutoCompactionEnabled?: boolean } = {}) {
+function captureHandler(args: { compactAfterTokens?: number; compactAfterTokensMode?: "calibrated" | "ratio"; compactAfterTokensRatio?: number; compactAtPiThresholdRatio?: number; passive?: boolean; compactInFlight?: boolean; piAutoCompactionEnabled?: boolean } = {}) {
 	let handler: ((event: unknown, ctx: unknown) => void) | undefined;
 	const pi = {
 		on: vi.fn((name: string, cb: typeof handler) => {
@@ -24,6 +27,7 @@ function captureHandler(args: { compactAfterTokens?: number; compactAfterTokensM
 			compactAfterTokens: args.compactAfterTokens ?? 3,
 			compactAfterTokensMode: args.compactAfterTokensMode ?? "calibrated",
 			compactAfterTokensRatio: args.compactAfterTokensRatio ?? 0.68,
+			compactAtPiThresholdRatio: args.compactAtPiThresholdRatio ?? 0.7,
 			passive: args.passive ?? false,
 			piAutoCompactionEnabled: args.piAutoCompactionEnabled ?? true,
 		},
@@ -516,6 +520,183 @@ describe("V3 compaction trigger", () => {
 
 			expect(ctx.compact).not.toHaveBeenCalled();
 			expect(runtime.compactInFlight).toBe(false);
+		});
+	});
+
+	describe("context pressure", () => {
+		// Pi's threshold for this model is 372,000 - 72,000 = 300,000 (the per-model
+		// override, not the general 147,000 reserve), so 70% of it is 210,000.
+		const model = { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 372_000 };
+		let root: string;
+		let cwd: string;
+		let agentDir: string;
+		let previousAgentDir: string | undefined;
+
+		beforeEach(() => {
+			root = join(tmpdir(), `om-context-pressure-${process.pid}-${Math.random().toString(16).slice(2)}`);
+			cwd = join(root, "project");
+			agentDir = join(root, "agent");
+			mkdirSync(cwd, { recursive: true });
+			mkdirSync(agentDir, { recursive: true });
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+				compaction: {
+					reserveTokens: 147_000,
+					modelOverrides: { "anthropic/claude-opus-5-5": { reserveTokens: 72_000 } },
+				},
+			}));
+			previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+		});
+
+		afterEach(() => {
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			rmSync(root, { recursive: true, force: true });
+		});
+
+		function pressureCtx(branches: TestEntry[][], tokens: (number | null)[], { projectTrusted = true } = {}) {
+			let usageIndex = 0;
+			return fakeCtx(branches, {
+				cwd,
+				model,
+				isProjectTrusted: () => projectTrusted,
+				getContextUsage: vi.fn(() => ({
+					tokens: tokens[Math.min(usageIndex++, tokens.length - 1)],
+					contextWindow: model.contextWindow,
+				})),
+			});
+		}
+
+		function assistantWithContext(id: string, totalTokens: number): TestEntry {
+			return rawMessage(id, "done", {
+				message: { role: "assistant", content: "done", stopReason: "stop", usage: { totalTokens } },
+			});
+		}
+
+		it("compacts an idle session at 70% of Pi's per-model threshold before the observed threshold", async () => {
+			const { handler } = captureHandler({ compactAfterTokens: 81_000 });
+			const ctx = pressureCtx([belowBranch], [210_000]);
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).toHaveBeenCalledTimes(1);
+			expect(ctx.ui.notify).toHaveBeenCalledWith(
+				"Observational memory: context reached ~210,000 tokens, 70% of Pi's 300,000-token compaction threshold; triggering compaction",
+				"info",
+			);
+		});
+
+		it("does not compact below 70% of Pi's per-model threshold", async () => {
+			const { handler, runtime } = captureHandler({ compactAfterTokens: 81_000 });
+			const ctx = pressureCtx([belowBranch], [209_999]);
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+			expect(runtime.compactInFlight).toBe(false);
+		});
+
+		it("uses compactAtPiThresholdRatio", async () => {
+			const { handler } = captureHandler({ compactAfterTokens: 81_000, compactAtPiThresholdRatio: 0.5 });
+			const ctx = pressureCtx([belowBranch], [150_000]);
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not compact by context when Pi's automatic compaction is disabled", async () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+				compaction: { enabled: false, modelOverrides: { "anthropic/claude-opus-5-5": { reserveTokens: 72_000 } } },
+			}));
+			const { handler } = captureHandler({ compactAfterTokens: 81_000 });
+			const ctx = pressureCtx([belowBranch], [290_000]);
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+		});
+
+		it("follows Pi in ignoring an untrusted project's compaction settings", async () => {
+			mkdirSync(join(cwd, ".pi"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ compaction: { enabled: false } }));
+			const { handler } = captureHandler({ compactAfterTokens: 81_000 });
+			const ctx = pressureCtx([belowBranch], [210_000], { projectTrusted: false });
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not guess Pi's threshold when its settings fail to load", async () => {
+			writeFileSync(join(agentDir, "settings.json"), "{ not json");
+			const { handler } = captureHandler({ compactAfterTokens: 81_000 });
+			const ctx = pressureCtx([belowBranch], [290_000]);
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+		});
+
+		it("waits for the next response after a compaction, then compacts only once context reaches the trigger again", async () => {
+			const { handler } = captureHandler({ compactAfterTokens: 81_000 });
+			const justCompacted = [compactionEntry("cmp-1", { firstKeptEntryId: "kept" }), textCustomMessage("kept", "aaaa")];
+			const afterOneTurn = [...justCompacted, assistantWithContext("a-1", 65_000)];
+
+			// Pi reports no context size until a response follows the compaction.
+			const first = pressureCtx([justCompacted], [null]);
+			handler(agentSettled(), first);
+			await vi.runAllTimersAsync();
+			expect(first.compact).not.toHaveBeenCalled();
+
+			const second = pressureCtx([afterOneTurn], [65_000]);
+			handler(agentSettled(), second);
+			await vi.runAllTimersAsync();
+			expect(second.compact).not.toHaveBeenCalled();
+
+			const grown = [...afterOneTurn, assistantWithContext("a-2", 212_000)];
+			const third = pressureCtx([grown], [212_000]);
+			handler(agentSettled(), third);
+			await vi.runAllTimersAsync();
+			expect(third.compact).toHaveBeenCalledTimes(1);
+		});
+
+		it("leaves compaction to Pi when the latest compaction already left context at the trigger", async () => {
+			const { handler } = captureHandler({ compactAfterTokens: 81_000 });
+			const branch = [
+				compactionEntry("cmp-1", { firstKeptEntryId: "kept" }),
+				textCustomMessage("kept", "aaaa"),
+				assistantWithContext("a-1", 215_000),
+				assistantWithContext("a-2", 240_000),
+			];
+			const ctx = pressureCtx([branch], [240_000]);
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+		});
+
+		it("re-checks context before deferred compaction", async () => {
+			const { handler, runtime } = captureHandler({ compactAfterTokens: 81_000 });
+			// Another compaction finished before the deferred check ran.
+			const ctx = pressureCtx([belowBranch], [230_000, null]);
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).not.toHaveBeenCalled();
+			expect(runtime.compactInFlight).toBe(false);
+			expect(ctx.ui.notify).toHaveBeenCalledWith(
+				"Observational memory: compaction skipped — another compaction already ran before deferred compaction",
+				"info",
+			);
 		});
 	});
 });

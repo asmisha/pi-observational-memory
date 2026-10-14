@@ -43,6 +43,13 @@ export interface Config {
 	compactAfterTokensMode: CompactAfterTokensMode;
 	compactAfterTokensRatio: number;
 	/**
+	 * Fraction of Pi's automatic-compaction threshold (the context window minus
+	 * Pi's `compaction.reserveTokens` for the session model) at which an idle
+	 * session compacts by real context usage, so the next run starts with room
+	 * instead of reaching Pi's threshold part-way through.
+	 */
+	compactAtPiThresholdRatio: number;
+	/**
 	 * Maximum estimated source tokens the compaction hook may keep in context
 	 * when it moves Pi's retention boundary back to the observer frontier so
 	 * that unobserved entries are not discarded. Unset (default) derives the
@@ -135,6 +142,7 @@ export const DEFAULTS: Config = {
 	compactAfterTokens: 81_000,
 	compactAfterTokensMode: "calibrated",
 	compactAfterTokensRatio: 0.68,
+	compactAtPiThresholdRatio: 0.7,
 	observationsPoolMaxTokens: 20_000,
 	observationsPoolTargetTokens: 10_000,
 	reflectionsPoolMaxTokens: 10_000,
@@ -364,6 +372,8 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 	}
 	const ratio = validRatioOrUndefined(value.compactAfterTokensRatio);
 	if (ratio !== undefined) normalized.compactAfterTokensRatio = ratio;
+	const piThresholdRatio = validRatioOrUndefined(value.compactAtPiThresholdRatio);
+	if (piThresholdRatio !== undefined) normalized.compactAtPiThresholdRatio = piThresholdRatio;
 	if (typeof value.consolidateWhenIdle === "boolean") normalized.consolidateWhenIdle = value.consolidateWhenIdle;
 	if (typeof value.showWorkerNotifications === "boolean") normalized.showWorkerNotifications = value.showWorkerNotifications;
 	if (typeof value.passive === "boolean") normalized.passive = value.passive;

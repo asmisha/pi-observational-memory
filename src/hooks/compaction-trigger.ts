@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveCompactAfterTokens } from "../config.js";
+import { contextPressure } from "../context-pressure.js";
 import { observedTokensSinceLastCompaction, rawTokensSinceLastCompaction, type Entry } from "../session-ledger/index.js";
 import type { Runtime } from "../runtime.js";
 
@@ -30,9 +31,28 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 }
 
 /**
- * Trigger proactive compaction when the observed-source threshold is reached
- * and Pi is idle. Also called after an idle-mode consolidation run finishes, so
- * compaction is not starved by memory work that ran on the same settled event.
+ * Why the session should compact now, or undefined. Either the observed-source
+ * threshold is reached, or real context passed `compactAtPiThresholdRatio` of
+ * Pi's own compaction threshold.
+ */
+function compactionDueReason(runtime: Runtime, ctx: CompactionTriggerCtx, entries: Entry[], threshold: number): string | undefined {
+	const progress = compactionProgress(runtime, entries);
+	if (progress >= threshold) {
+		return `compaction threshold reached (~${progress.toLocaleString()} ${progressLabel(runtime)} source tokens)`;
+	}
+	const pressure = contextPressure(runtime, ctx, entries);
+	if (pressure?.due && pressure.tokens !== null) {
+		const percent = Math.round(runtime.config.compactAtPiThresholdRatio * 100);
+		return `context reached ~${pressure.tokens.toLocaleString()} tokens, ${percent}% of Pi's ${pressure.piThresholdTokens.toLocaleString()}-token compaction threshold`;
+	}
+	return undefined;
+}
+
+/**
+ * Trigger proactive compaction when Pi is idle and either the observed-source
+ * threshold or the context-pressure threshold is reached. Also called after an
+ * idle-mode consolidation run finishes, so compaction is not starved by memory
+ * work that ran on the same settled event.
  */
 export function maybeTriggerCompaction(runtime: Runtime, ctx: CompactionTriggerCtx): void {
 	{
@@ -42,20 +62,17 @@ export function maybeTriggerCompaction(runtime: Runtime, ctx: CompactionTriggerC
 
 		const entries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;
 		if (!entries) return;
-		const progress = compactionProgress(runtime, entries);
 		const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
 		const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
-		if (progress < threshold) return;
+		const reason = compactionDueReason(runtime, ctx, entries, threshold);
+		if (reason === undefined) return;
 
 		// Capture ctx properties synchronously — the setTimeout + async work below
 		// may outlive the extension ctx (stale after session replacement/reload).
 		const hasUI = ctx.hasUI;
 		const ui = ctx.ui;
 
-		if (hasUI) ui?.notify(
-			`Observational memory: compaction threshold reached (~${progress.toLocaleString()} ${progressLabel(runtime)} source tokens); triggering compaction`,
-			"info",
-		);
+		if (hasUI) ui?.notify(`Observational memory: ${reason}; triggering compaction`, "info");
 
 		runtime.compactInFlight = true;
 		setTimeout(() => {
@@ -73,8 +90,7 @@ export function maybeTriggerCompaction(runtime: Runtime, ctx: CompactionTriggerC
 					runtime.compactInFlight = false;
 					return;
 				}
-				const currentProgress = compactionProgress(runtime, currentEntries);
-				if (currentProgress < threshold) {
+				if (compactionDueReason(runtime, ctx, currentEntries, threshold) === undefined) {
 					runtime.compactInFlight = false;
 					if (hasUI) ui?.notify(
 						"Observational memory: compaction skipped — another compaction already ran before deferred compaction",

@@ -12,7 +12,7 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 |---|---|
 | `turn_end` observer trigger | Maybe run the observer in the background. |
 | `turn_end` reflect/drop trigger | Maybe run the due reflector, then run dropper maintenance only after same-run successful reflection. |
-| `agent_settled` compaction trigger | Maybe call `ctx.compact()` when idle and over `compactAfterTokens`, after Pi finishes retries and queued continuation. |
+| `agent_settled` compaction trigger | Maybe call `ctx.compact()` when idle and over `compactAfterTokens` or `compactAtPiThresholdRatio` of Pi's threshold, after Pi finishes retries and queued continuation. |
 | `session_before_compact` hook | Build the V3 compaction payload deterministically. |
 | `/om:status` | Show ledger counts, drift, progress clocks, and worker state. |
 | `/om:view` | Show visible or full memory content and attempt to copy the rendered memory text. |
@@ -35,7 +35,7 @@ flowchart TD
     Reflector[Reflector model call<br/>append om.reflections.recorded]
     Dropper[Dropper model call<br/>append om.observations.dropped]
 
-    CompactDue{raw tokens since compaction<br/>≥ compactAfterTokens<br/>and idle?}
+    CompactDue{raw tokens since compaction<br/>≥ compactAfterTokens, or context<br/>≥ compactAtPiThresholdRatio of Pi's threshold,<br/>and idle?}
     CompactCall[ctx.compact]
 
     Fold[fold/project V3 ledger]
@@ -203,14 +203,15 @@ It skips when:
 
 - `passive` is true;
 - compaction is already in flight;
-- estimated source-entry progress after the latest compaction boundary is below `compactAfterTokens`;
+- estimated source-entry progress after the latest compaction boundary is below `compactAfterTokens`, and Pi's reported context is below `compactAtPiThresholdRatio` of Pi's own compaction threshold (see [`compactAtPiThresholdRatio`](configuration.md#compactatpithresholdratio) for when that check is unavailable or held);
 - Pi is not idle after the deferred check;
-- the raw threshold is no longer met after the deferred check.
+- neither threshold is met any more after the deferred check.
 
 The count starts at `firstKeptEntryId` when Pi provides that boundary. Memory
-ledger entries and compaction metadata contribute zero. The trigger uses this
-same raw metric before scheduling and in the deferred re-check, then calls
-`ctx.compact()` when all checks pass.
+ledger entries and compaction metadata contribute zero. The trigger uses the
+same metrics before scheduling and in the deferred re-check, then calls
+`ctx.compact()` when all checks pass. The context check lets a run start with
+room instead of reaching Pi's threshold part-way through.
 
 This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
 
@@ -290,6 +291,7 @@ Shows:
 - recorded/dropped/visible observation counts, with plain `+N` / `-N` visible-vs-full drift suffixes when drift exists;
 - recorded/visible reflection counts, with a plain `+N` drift suffix when full memory has extra reflections;
 - next observation/reflection/compaction token progress and drop coverage since the last successful drop;
+- context pressure against `compactAtPiThresholdRatio` of Pi's compaction threshold, when Pi reports it;
 - visible observation pool pressure against `observationsPoolMaxTokens` from the current compaction projection;
 - active observation pool pressure against `observationsPoolTargetTokens` from folded active observations;
 - dropper state explaining whether the active pool is under target or waiting for the next successful reflection;

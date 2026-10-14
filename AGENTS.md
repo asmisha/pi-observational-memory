@@ -29,6 +29,14 @@ single place that applies Pi's auth acceptance rule — both the primary and fal
 it. Do not make the fallback mandatory: with none configured, the previous skip/fail-safe behavior
 must be byte-for-byte unchanged (covered by `tests/runtime.test.ts` and `tests/consolidation-trigger.test.ts`).
 
+## Context-pressure compaction (`compactAtPiThresholdRatio`)
+
+The `agent_settled` trigger fires on either clock: observed source tokens (`compactAfterTokens`) or Pi's
+reported context at `compactAtPiThresholdRatio` of Pi's own threshold (`src/context-pressure.ts`). Pi's
+per-model `reserveTokens` comes from Pi's `SettingsManager`, cached on the runtime; do not re-parse settings
+for it. The context clock holds while the first response after the latest compaction already reached the
+trigger, so a compaction that cannot get below it is not repeated after every run.
+
 ## Prebuilt extension entry
 
 `pi.extensions` loads the committed prebuilt module at `dist/index.ts`, so `src/` edits need

@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { registerStatusCommand } from "../src/commands/status.js";
 import {
@@ -16,7 +19,7 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
-function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; model?: unknown; contextUsage?: unknown }) {
+function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; model?: unknown; contextUsage?: unknown; cwd?: string }) {
 	let handler: ((args: unknown, ctx: any) => Promise<void>) | undefined;
 	const pi = {
 		registerCommand: vi.fn((name: string, command: { handler: typeof handler }) => {
@@ -47,7 +50,7 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; model?: unk
 	if (!handler) throw new Error("status handler not registered");
 	const notify = vi.fn();
 	const ctx = {
-		cwd: "/tmp/project",
+		cwd: args.cwd ?? "/tmp/project",
 		ui: { notify },
 		sessionManager: { getBranch: () => args.entries },
 		model: args.model,
@@ -295,6 +298,87 @@ describe("V3 /om:status", () => {
 			}).run();
 
 			expect(output).toContain("Next compaction:  ~0 / 30 observed source tokens (0%)");
+		});
+	});
+
+	describe("context pressure", () => {
+		// Pi's threshold for this model is 372,000 - 72,000 = 300,000; 70% of it is 210,000.
+		const model = { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 372_000 };
+		const config = {
+			observeAfterTokens: 10,
+			reflectAfterTokens: 20,
+			compactAfterTokens: 30,
+			compactAtPiThresholdRatio: 0.7,
+			observationsPoolMaxTokens: 40,
+			observationsPoolTargetTokens: 20,
+			passive: false,
+		};
+		let root: string;
+		let previousAgentDir: string | undefined;
+
+		beforeEach(() => {
+			root = join(tmpdir(), `om-status-pressure-${process.pid}-${Math.random().toString(16).slice(2)}`);
+			mkdirSync(join(root, "agent"), { recursive: true });
+			mkdirSync(join(root, "project"), { recursive: true });
+			writeFileSync(join(root, "agent", "settings.json"), JSON.stringify({
+				compaction: { reserveTokens: 147_000, modelOverrides: { "anthropic/claude-opus-5-5": { reserveTokens: 72_000 } } },
+			}));
+			previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+			process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+		});
+
+		afterEach(() => {
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			rmSync(root, { recursive: true, force: true });
+		});
+
+		function status(entries: TestEntry[], tokens: number | null) {
+			return setup({
+				entries,
+				runtime: { config },
+				model,
+				contextUsage: { tokens, contextWindow: model.contextWindow },
+				cwd: join(root, "project"),
+			}).run();
+		}
+
+		it("shows context against 70% of Pi's per-model threshold", async () => {
+			expect(await status([], 150_000)).toContain(
+				"Context pressure: ~150,000 / 210,000 tokens (71%); compacts when idle at 70% of Pi's 300,000-token threshold",
+			);
+		});
+
+		it("shows unknown context right after a compaction", async () => {
+			expect(await status([compactionEntry("cmp-1")], null)).toContain(
+				"Context pressure: unknown until the next response / 210,000 tokens; compacts when idle at 70% of Pi's 300,000-token threshold",
+			);
+		});
+
+		it("omits context pressure in passive mode, where the trigger does not run", async () => {
+			const output = await setup({
+				entries: [],
+				runtime: { config: { ...config, passive: true } },
+				model,
+				contextUsage: { tokens: 150_000, contextWindow: model.contextWindow },
+				cwd: join(root, "project"),
+			}).run();
+
+			expect(output).not.toContain("Context pressure");
+		});
+
+		it("explains when the latest compaction already left context at the trigger", async () => {
+			const entries = [
+				compactionEntry("cmp-1", { firstKeptEntryId: "kept" }),
+				textCustomMessage("kept", "aaaa"),
+				rawMessage("a-1", "done", {
+					message: { role: "assistant", content: "done", stopReason: "stop", usage: { totalTokens: 215_000 } },
+				}),
+			];
+
+			expect(await status(entries, 240_000)).toContain(
+				"Context pressure: ~240,000 / 210,000 tokens (114%); waiting for Pi's 300,000-token threshold: the first response after the latest compaction already used ~215,000 tokens",
+			);
 		});
 	});
 });

@@ -64,6 +64,7 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `observerChunkMaxTokens` | positive integer | derived; minimum `256` | Maximum estimated tokens sent to one observer run. Unset: 20% of the resolved memory model's context window, or `60000` when unknown. |
 | `compactAfterTokens` | positive integer | `81000` | Estimated source-entry threshold for proactive auto-compaction, counted after the latest compaction boundary and only up to the observation frontier. |
 | `compactionMaxRetainedTokens` | positive integer | derived | Maximum estimated source tokens the compaction hook may keep in context when it retains entries the observer has not reached yet. Unset: half of the active session model's context window, or `60000` when unknown. |
+| `compactAtPiThresholdRatio` | number in `(0, 1)` | `0.7` | Idle sessions compact when Pi's reported context reaches this fraction of Pi's own compaction threshold (`contextWindow - reserveTokens` for the session model). |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
 | `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
@@ -123,13 +124,30 @@ Default: `81000`.
 
 The auto-compaction trigger runs from Pi's `agent_settled` hook, after retries, automatic compaction, and queued continuation finish. It counts estimated source-entry tokens after the latest compaction boundary **that observation coverage has already reached** — the span a compaction can fold into memory. The count starts at `firstKeptEntryId` when Pi provides that boundary, so retained source entries remain part of the metric, and it stops at the latest observer coverage marker. Memory ledger entries and compaction metadata contribute zero. If the count reaches `compactAfterTokens`, the extension defers with `setTimeout(0)`, checks that Pi is idle, re-checks the same metric, and calls `ctx.compact()`. Pi's provider context usage is not used for this threshold.
 
-Source entries the observer has not reached yet never count toward this threshold, so a session whose observer is slower than the conversation waits for coverage instead of compacting away unobserved context. Without any observation coverage, proactive compaction does not fire at all; Pi's own threshold compaction remains in charge.
+Source entries the observer has not reached yet never count toward this threshold, so a session whose observer is slower than the conversation waits for coverage instead of compacting away unobserved context. Without any observation coverage, this threshold does not fire at all; [`compactAtPiThresholdRatio`](#compactatpithresholdratio) and Pi's own threshold compaction remain in charge.
 
 That backstop only exists while Pi's own automatic compaction is on. When Pi's `compaction.enabled` is `false` (read from the same `settings.json` files), the trigger counts raw source tokens after the boundary instead, as before this change, so a stalled observer cannot leave context growing unchecked. The compaction hook still protects the unobserved entries (catch-up, retention, or delegation to Pi's native summarizer). `/om:status` labels the metric accordingly: "observed" or "estimated" source tokens.
 
 This trigger does not wait for observer, reflector, or dropper work. Actual compaction summary creation happens later in `session_before_compact`. A non-empty V3 projection is rendered deterministically and model-free; an empty projection delegates to Pi's native summarizer so prior context is not replaced by an empty summary.
 
 Pi's own window-pressure compaction and manual compaction can still happen independently of this proactive trigger. See [`compactionMaxRetainedTokens`](#compactionmaxretainedtokens) for how the hook protects unobserved context in those cases.
+
+## `compactAtPiThresholdRatio`
+
+Default: `0.7`.
+
+Pi compacts automatically when context exceeds its threshold: the model's context window minus `compaction.reserveTokens` (including Pi's per-model `compaction.modelOverrides`). Pi checks that threshold between model calls, so a run that starts close to it is compacted part-way through, and the kept context may no longer contain the request the run is answering.
+
+The same `agent_settled` trigger therefore also compacts an idle session once Pi's reported context (`ctx.getContextUsage()`) reaches `compactAtPiThresholdRatio` of Pi's threshold, so the next run starts with room to grow. With a 372,000-token window and a 72,000-token reserve, Pi's threshold is 300,000 and the default ratio compacts idle sessions from 210,000 tokens.
+
+This trigger is independent of `compactAfterTokens` and fires without observation coverage; the compaction hook still protects source entries the observer has not reached (catch-up, retention, or delegation to Pi's native summarizer). It does not fire when:
+
+- Pi's automatic compaction is disabled (`compaction.enabled: false`);
+- Pi's settings cannot be loaded, or the session model or its context window is unknown;
+- Pi has not reported context since the latest compaction (no response yet);
+- the first response after the latest compaction already used at least the trigger amount. Compacting again would likely leave the next run at the same level, so the session waits for Pi's threshold instead of compacting after every run.
+
+Pi's reserve is read once per extension runtime, like the rest of the configuration. Values close to `1` approximate the behavior without this trigger. `/om:status` shows the current context against the trigger on the `Context pressure` line.
 
 ## `compactionMaxRetainedTokens`
 

@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { resolveCompactAfterTokens } from "../config.js";
+import { contextPressure, type ContextPressure } from "../context-pressure.js";
 import { compactionProgress as compactionProgressFor, progressLabel } from "../hooks/compaction-trigger.js";
 import type { Runtime } from "../runtime.js";
 import {
@@ -34,6 +35,18 @@ function removedSuffix(count: number): string | undefined {
 function appendSuffixes(line: string, suffixes: (string | undefined)[]): string {
 	const rendered = suffixes.filter((suffix): suffix is string => suffix !== undefined);
 	return rendered.length > 0 ? `${line} ${rendered.join(" ")}` : line;
+}
+
+function contextPressureLine(pressure: ContextPressure, ratio: number): string {
+	const trigger = pressure.triggerTokens.toLocaleString();
+	const piThreshold = pressure.piThresholdTokens.toLocaleString();
+	const current = pressure.tokens === null
+		? `unknown until the next response / ${trigger} tokens`
+		: `~${pressure.tokens.toLocaleString()} / ${trigger} tokens (${pct(pressure.tokens, pressure.triggerTokens)}%)`;
+	if (pressure.heldByPostCompactionTokens !== undefined) {
+		return `Context pressure: ${current}; waiting for Pi's ${piThreshold}-token threshold: the first response after the latest compaction already used ~${pressure.heldByPostCompactionTokens.toLocaleString()} tokens`;
+	}
+	return `Context pressure: ${current}; compacts when idle at ${Math.round(ratio * 100)}% of Pi's ${piThreshold}-token threshold`;
 }
 
 export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void {
@@ -70,6 +83,7 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			const unobservedSinceCompaction = Math.max(0, rawTokensSinceLastCompaction(entries) - observedTokensSinceLastCompaction(entries));
 			const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
 			const compactThreshold = resolveCompactAfterTokens(runtime.config, contextWindow);
+			const pressure = runtime.config.passive === true ? undefined : contextPressure(runtime, ctx, entries);
 
 			const passiveLines = runtime.config.passive === true
 				? [
@@ -89,6 +103,7 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				`Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
 				`Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} observed tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
 				`Next compaction:  ~${compactionProgress.toLocaleString()} / ${compactThreshold.toLocaleString()} ${progressLabel(runtime)} source tokens (${pct(compactionProgress, compactThreshold)}%)`,
+				...(pressure ? [contextPressureLine(pressure, runtime.config.compactAtPiThresholdRatio)] : []),
 				`Observer backlog: ~${unobservedSinceCompaction.toLocaleString()} unobserved source tokens since the compaction boundary`,
 				`Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
 				`Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,

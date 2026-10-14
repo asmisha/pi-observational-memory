@@ -1218,7 +1218,7 @@ function boundWorkerMemory(reflections, observations, maxTokens, options = {}) {
 }
 
 // src/context-pressure.ts
-function piReserveTokens(runtime, ctx) {
+function piCompactionSettings(runtime, ctx) {
   const model = ctx.model;
   if (typeof model?.provider !== "string" || typeof model.id !== "string") return void 0;
   if (!runtime.piSettings) {
@@ -1226,15 +1226,14 @@ function piReserveTokens(runtime, ctx) {
     if (settings.drainErrors().length > 0) return void 0;
     runtime.piSettings = settings;
   }
-  return runtime.piSettings.getCompactionSettings({ provider: model.provider, id: model.id }).reserveTokens;
+  return runtime.piSettings.getCompactionSettings({ provider: model.provider, id: model.id });
 }
 function contextPressure(runtime, ctx, entries) {
-  if (runtime.config.piAutoCompactionEnabled === false) return void 0;
   const usage = ctx.getContextUsage?.();
   if (!usage || !(usage.contextWindow > 0)) return void 0;
-  const reserveTokens = piReserveTokens(runtime, ctx);
-  if (reserveTokens === void 0) return void 0;
-  const piThresholdTokens = usage.contextWindow - reserveTokens;
+  const settings = piCompactionSettings(runtime, ctx);
+  if (!settings?.enabled) return void 0;
+  const piThresholdTokens = usage.contextWindow - settings.reserveTokens;
   if (piThresholdTokens <= 0) return void 0;
   const triggerTokens = Math.floor(piThresholdTokens * runtime.config.compactAtPiThresholdRatio);
   const compactionIndex = findLastCompactionIndex(entries);

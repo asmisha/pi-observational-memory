@@ -28,12 +28,14 @@ export interface ContextPressure {
 }
 
 /**
- * Pi's resolved `compaction.reserveTokens` for the session model, read through
- * Pi's own settings manager so per-model overrides follow Pi's precedence.
- * Loaded once per runtime, like the extension's config. A settings load error
- * leaves the reserve unknown rather than falling back to Pi's built-in default.
+ * Pi's resolved compaction settings for the session model, read through Pi's
+ * own settings manager so project trust and per-model overrides follow Pi's
+ * precedence. Loaded once per runtime, like the extension's config, from the
+ * settings files Pi's CLI reads (agent directory and project); the declared
+ * extension API does not expose the session's own settings. A settings load
+ * error leaves them unknown rather than falling back to Pi's built-in defaults.
  */
-function piReserveTokens(runtime: Runtime, ctx: ContextPressureCtx): number | undefined {
+function piCompactionSettings(runtime: Runtime, ctx: ContextPressureCtx): { enabled: boolean; reserveTokens: number } | undefined {
 	const model = ctx.model;
 	if (typeof model?.provider !== "string" || typeof model.id !== "string") return undefined;
 	if (!runtime.piSettings) {
@@ -41,7 +43,7 @@ function piReserveTokens(runtime: Runtime, ctx: ContextPressureCtx): number | un
 		if (settings.drainErrors().length > 0) return undefined;
 		runtime.piSettings = settings;
 	}
-	return runtime.piSettings.getCompactionSettings({ provider: model.provider, id: model.id }).reserveTokens;
+	return runtime.piSettings.getCompactionSettings({ provider: model.provider, id: model.id });
 }
 
 /**
@@ -51,12 +53,11 @@ function piReserveTokens(runtime: Runtime, ctx: ContextPressureCtx): number | un
  * Undefined when Pi's automatic compaction is off or the threshold is unknown.
  */
 export function contextPressure(runtime: Runtime, ctx: ContextPressureCtx, entries: Entry[]): ContextPressure | undefined {
-	if (runtime.config.piAutoCompactionEnabled === false) return undefined;
 	const usage = ctx.getContextUsage?.();
 	if (!usage || !(usage.contextWindow > 0)) return undefined;
-	const reserveTokens = piReserveTokens(runtime, ctx);
-	if (reserveTokens === undefined) return undefined;
-	const piThresholdTokens = usage.contextWindow - reserveTokens;
+	const settings = piCompactionSettings(runtime, ctx);
+	if (!settings?.enabled) return undefined;
+	const piThresholdTokens = usage.contextWindow - settings.reserveTokens;
 	if (piThresholdTokens <= 0) return undefined;
 
 	const triggerTokens = Math.floor(piThresholdTokens * runtime.config.compactAtPiThresholdRatio);

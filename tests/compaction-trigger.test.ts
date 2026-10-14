@@ -554,12 +554,12 @@ describe("V3 compaction trigger", () => {
 			rmSync(root, { recursive: true, force: true });
 		});
 
-		function pressureCtx(branches: TestEntry[][], tokens: (number | null)[]) {
+		function pressureCtx(branches: TestEntry[][], tokens: (number | null)[], { projectTrusted = true } = {}) {
 			let usageIndex = 0;
 			return fakeCtx(branches, {
 				cwd,
 				model,
-				isProjectTrusted: () => true,
+				isProjectTrusted: () => projectTrusted,
 				getContextUsage: vi.fn(() => ({
 					tokens: tokens[Math.min(usageIndex++, tokens.length - 1)],
 					contextWindow: model.contextWindow,
@@ -609,13 +609,28 @@ describe("V3 compaction trigger", () => {
 		});
 
 		it("does not compact by context when Pi's automatic compaction is disabled", async () => {
-			const { handler } = captureHandler({ compactAfterTokens: 81_000, piAutoCompactionEnabled: false });
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({
+				compaction: { enabled: false, modelOverrides: { "anthropic/claude-opus-5-5": { reserveTokens: 72_000 } } },
+			}));
+			const { handler } = captureHandler({ compactAfterTokens: 81_000 });
 			const ctx = pressureCtx([belowBranch], [290_000]);
 
 			handler(agentSettled(), ctx);
 			await vi.runAllTimersAsync();
 
 			expect(ctx.compact).not.toHaveBeenCalled();
+		});
+
+		it("follows Pi in ignoring an untrusted project's compaction settings", async () => {
+			mkdirSync(join(cwd, ".pi"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ compaction: { enabled: false } }));
+			const { handler } = captureHandler({ compactAfterTokens: 81_000 });
+			const ctx = pressureCtx([belowBranch], [210_000], { projectTrusted: false });
+
+			handler(agentSettled(), ctx);
+			await vi.runAllTimersAsync();
+
+			expect(ctx.compact).toHaveBeenCalledTimes(1);
 		});
 
 		it("does not guess Pi's threshold when its settings fail to load", async () => {

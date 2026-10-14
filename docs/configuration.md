@@ -147,7 +147,7 @@ This trigger is independent of `compactAfterTokens` and fires without observatio
 - Pi has not reported context since the latest compaction (no response yet);
 - the first response after the latest compaction already used at least the trigger amount. Compacting again would likely leave the next run at the same level, so the session waits for Pi's threshold instead of compacting after every run.
 
-Pi's reserve is read once per extension runtime, like the rest of the configuration. Values close to `1` approximate the behavior without this trigger. `/om:status` shows the current context against the trigger on the `Context pressure` line.
+Pi's compaction settings are read once per extension runtime, like the rest of the configuration, from the settings files Pi's CLI reads (agent directory and trusted project); an SDK host that gives its session other settings is not reflected. Values close to `1` approximate the behavior without this trigger. `/om:status` shows the current context against the trigger on the `Context pressure` line.
 
 ## `compactionMaxRetainedTokens`
 

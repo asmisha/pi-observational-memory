@@ -294,9 +294,9 @@ See [`compactAtPiThresholdRatio`](docs/configuration.md#compactatpithresholdrati
 
 ### Workflow subagents
 
-[pi-dynamic-workflows](https://github.com/asmisha/pi-dynamic-workflows) sets the session flag `pi-dynamic-workflows-subagent` on its subagents. Most of them finish before Pi compacts, so background memory work there would be spent on sessions that never use it. In a flagged session the extension runs no background workers and never starts a compaction itself. When Pi compacts, the hook observes everything before Pi's cut, from the start of the session and without the `compactionCatchUpMaxChunks` cap, and writes the summary from those observations. Pi waits while this runs. If observation fails or finds nothing, Pi's native summarizer runs as usual.
+[pi-dynamic-workflows](https://github.com/asmisha/pi-dynamic-workflows) marks its subagent sessions with the `pi-dynamic-workflows-subagent` flag. Most subagents finish before Pi ever compacts, so background memory work in them is usually wasted. In a flagged session the extension runs no background workers and never starts a compaction itself. When Pi compacts, the hook observes every entry Pi is about to summarize, starting from the beginning of the session and ignoring `compactionCatchUpMaxChunks`, then writes the summary from those observations. Pi waits for this. If observation fails or finds nothing, Pi's native summarizer runs as usual.
 
-The point is the subagent's reasoning. A tool-heavy subagent keeps most of it in thinking blocks, which Pi's native summarizer does not read, so a native summary drops decisions the subagent settled but never wrote out. The observer reads thinking.
+This keeps a subagent's reasoning. A subagent that mostly calls tools does its reasoning in thinking blocks. Pi's native summarizer doesn't read thinking blocks, so its summary drops decisions the subagent made but never wrote out. The observer reads them.
 
 ### Defaults
 

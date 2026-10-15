@@ -18,7 +18,7 @@ export default function observationalMemory(pi: ExtensionAPI) {
 		type: "boolean",
 		default: false,
 	});
-	// The flag is readable only once the session is bound, not at factory load.
+	// The flag value is not available while this factory runs; read it at session start.
 	pi.on("session_start", () => {
 		runtime.workflowSubagent = pi.getFlag(WORKFLOW_SUBAGENT_FLAG) === true;
 	});

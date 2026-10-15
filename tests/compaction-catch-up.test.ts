@@ -265,7 +265,7 @@ describe("catch-up coverage truthfulness (PR #81 review, issue 2)", () => {
 });
 
 describe("workflow subagent compaction", () => {
-	/** No memory exists yet: a subagent has no background observer. Pi proposes to keep from u2. */
+	/** Nothing is observed yet because a subagent has no background observer. Pi keeps u2 onward. */
 	function uncoveredBranch(): TestEntry[] {
 		return [
 			userMessage("u0", "u".repeat(400)),
@@ -276,7 +276,7 @@ describe("workflow subagent compaction", () => {
 		];
 	}
 
-	it("observes the whole range before Pi's cut, past the configured chunk cap, and summarizes from memory", async () => {
+	it("observes every entry Pi summarizes, past the configured chunk cap, and writes the summary from memory", async () => {
 		let calls = 0;
 		mockAgents.runObserver.mockImplementation(async ({ allowedSourceEntryIds }: { allowedSourceEntryIds: string[] }) => [
 			observation((++calls).toString(16).padStart(12, "0"), { sourceEntryIds: allowedSourceEntryIds }),

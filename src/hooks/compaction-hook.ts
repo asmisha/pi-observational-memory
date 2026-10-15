@@ -170,8 +170,8 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 	// tail or handing the whole range to Pi's native summarizer, observe the
 	// gap now: Pi waits for this hook, so the memory model has the server to
 	// itself, and observations are durable where a native summary is not.
-	// A workflow subagent has no background observer, so this is where its
-	// memory is built: observe from the session start until the gap is covered.
+	// A workflow subagent has no background observer, so its memory is built
+	// here: observe every entry Pi is about to summarize, from the session start.
 	const workflowSubagent = runtime.workflowSubagent;
 	if (
 		resolution.gap

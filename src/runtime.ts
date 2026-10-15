@@ -122,8 +122,8 @@ export class Runtime {
 	compactHookInFlight = false;
 	/**
 	 * The session is a pi-dynamic-workflows subagent. Most subagents finish
-	 * before Pi's compaction threshold, so background memory work would be paid
-	 * for sessions that never compact. Memory is built only when Pi compacts.
+	 * before Pi compacts, so background memory work in them is usually wasted.
+	 * Memory is built only when Pi compacts.
 	 */
 	workflowSubagent = false;
 	resolveFailureNotified = false;

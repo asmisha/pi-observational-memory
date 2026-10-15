@@ -60,6 +60,7 @@ function setup(args: {
 	workerMemoryMaxTokens?: number;
 	showWorkerNotifications?: boolean;
 	passive?: boolean;
+	workflowSubagent?: boolean;
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
 	sessionId?: string;
@@ -100,6 +101,7 @@ function setup(args: {
 			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
 		},
 		consolidationInFlight: args.consolidationInFlight ?? false,
+		workflowSubagent: args.workflowSubagent ?? false,
 		consolidationAbortController: undefined as AbortController | undefined,
 		abortConsolidation: vi.fn(() => {
 			if (!runtime.consolidationInFlight || !runtime.consolidationAbortController) return false;
@@ -206,9 +208,12 @@ describe("V3 consolidation trigger", () => {
 		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
 
-	it("does not launch from either entrypoint in passive mode", () => {
+	it.each([
+		["passive mode", { passive: true }],
+		["a workflow subagent", { workflowSubagent: true }],
+	])("does not launch from either entrypoint in %s", (_label, mode) => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
-		const passive = setup({ entries, passive: true });
+		const passive = setup({ entries, ...mode });
 
 		passive.fireAgentStart();
 		passive.fireTurnEnd();

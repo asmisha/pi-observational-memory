@@ -57,7 +57,7 @@ function compactionDueReason(runtime: Runtime, ctx: CompactionTriggerCtx, entrie
 export function maybeTriggerCompaction(runtime: Runtime, ctx: CompactionTriggerCtx): void {
 	{
 		runtime.ensureConfig(ctx.cwd);
-		if (runtime.config.passive === true) return;
+		if (runtime.config.passive === true || runtime.workflowSubagent) return;
 		if (runtime.compactInFlight) return;
 
 		const entries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;

@@ -7,8 +7,21 @@ import { registerConsolidationTrigger } from "./hooks/consolidation-trigger.js";
 import { Runtime } from "./runtime.js";
 import { registerRecallTool } from "./tools/recall-observation.js";
 
+/** Session-local flag that pi-dynamic-workflows sets on its subagent sessions before binding extensions. */
+const WORKFLOW_SUBAGENT_FLAG = "pi-dynamic-workflows-subagent";
+
 export default function observationalMemory(pi: ExtensionAPI) {
 	const runtime = new Runtime();
+
+	pi.registerFlag(WORKFLOW_SUBAGENT_FLAG, {
+		description: "Session is managed by pi-dynamic-workflows",
+		type: "boolean",
+		default: false,
+	});
+	// The flag is readable only once the session is bound, not at factory load.
+	pi.on("session_start", () => {
+		runtime.workflowSubagent = pi.getFlag(WORKFLOW_SUBAGENT_FLAG) === true;
+	});
 
 	registerConsolidationTrigger(pi, runtime, {
 		afterIdleConsolidation: (ctx) => maybeTriggerCompaction(runtime, ctx as Parameters<typeof maybeTriggerCompaction>[1]),

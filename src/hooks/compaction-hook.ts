@@ -170,11 +170,14 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 	// tail or handing the whole range to Pi's native summarizer, observe the
 	// gap now: Pi waits for this hook, so the memory model has the server to
 	// itself, and observations are durable where a native summary is not.
+	// A workflow subagent has no background observer, so this is where its
+	// memory is built: observe from the session start until the gap is covered.
+	const workflowSubagent = runtime.workflowSubagent;
 	if (
 		resolution.gap
-		&& runtime.config.compactionCatchUpMaxChunks > 0
+		&& (workflowSubagent || runtime.config.compactionCatchUpMaxChunks > 0)
 		&& !runtime.consolidationInFlight
-		&& latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED) !== undefined
+		&& (workflowSubagent || latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED) !== undefined)
 	) {
 		const catchUp = await catchUpObserver({
 			pi,
@@ -182,7 +185,7 @@ async function handleCompaction(pi: ExtensionAPI, event: SessionBeforeCompactEve
 			ctx,
 			entries,
 			gap: resolution.gap,
-			maxChunks: runtime.config.compactionCatchUpMaxChunks,
+			maxChunks: workflowSubagent ? Number.POSITIVE_INFINITY : runtime.config.compactionCatchUpMaxChunks,
 			signal: event.signal,
 		});
 		debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });

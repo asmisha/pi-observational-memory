@@ -292,6 +292,12 @@ To give the next run room, an idle session also compacts once Pi's reported
 context reaches `compactAtPiThresholdRatio` (default `0.7`) of that threshold.
 See [`compactAtPiThresholdRatio`](docs/configuration.md#compactatpithresholdratio).
 
+### Workflow subagents
+
+[pi-dynamic-workflows](https://github.com/asmisha/pi-dynamic-workflows) sets the session flag `pi-dynamic-workflows-subagent` on its subagents. Most of them finish before Pi compacts, so background memory work there would be spent on sessions that never use it. In a flagged session the extension runs no background workers and never starts a compaction itself. When Pi compacts, the hook observes everything before Pi's cut, from the start of the session and without the `compactionCatchUpMaxChunks` cap, and writes the summary from those observations. Pi waits while this runs. If observation fails or finds nothing, Pi's native summarizer runs as usual.
+
+The point is the subagent's reasoning. A tool-heavy subagent keeps most of it in thinking blocks, which Pi's native summarizer does not read, so a native summary drops decisions the subagent settled but never wrote out. The observer reads thinking.
+
 ### Defaults
 
 | Setting                     | Default       | Meaning                                                                                           |

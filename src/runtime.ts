@@ -120,6 +120,12 @@ export class Runtime {
 	consolidationAbortController: AbortController | undefined;
 	compactInFlight = false;
 	compactHookInFlight = false;
+	/**
+	 * The session is a pi-dynamic-workflows subagent. Most subagents finish
+	 * before Pi's compaction threshold, so background memory work would be paid
+	 * for sessions that never compact. Memory is built only when Pi compacts.
+	 */
+	workflowSubagent = false;
 	resolveFailureNotified = false;
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;

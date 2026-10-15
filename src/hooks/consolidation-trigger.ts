@@ -353,7 +353,7 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 /** Launch a consolidation run when any stage is due. Returns its promise, or undefined when nothing launched. */
 function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): Promise<void> | undefined {
 	runtime.ensureConfig(ctx.cwd);
-	if (runtime.config.passive === true) return undefined;
+	if (runtime.config.passive === true || runtime.workflowSubagent) return undefined;
 	if (runtime.consolidationInFlight) return undefined;
 
 	const entries = ctx.sessionManager.getBranch() as Entry[];

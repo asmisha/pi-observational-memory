@@ -55,6 +55,7 @@ function setup(args: {
 	observerChunkMaxTokens?: number;
 	consolidationInFlight?: boolean;
 	resolveOk?: boolean;
+	workflowSubagent?: boolean;
 }) {
 	let entries = [...args.entries];
 	let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
@@ -85,6 +86,7 @@ function setup(args: {
 		},
 		compactHookInFlight: false,
 		consolidationInFlight: args.consolidationInFlight ?? false,
+		workflowSubagent: args.workflowSubagent ?? false,
 		resolveModel: vi.fn(async () => (args.resolveOk === false
 			? { ok: false, reason: "no model" }
 			: { ok: true, model: { provider: "gtr7", id: "memory", contextWindow: 65536 }, apiKey: "key" })),
@@ -259,5 +261,34 @@ describe("catch-up coverage truthfulness (PR #81 review, issue 2)", () => {
 		const allowed = mockAgents.runObserver.mock.calls[0][0].allowedSourceEntryIds;
 		expect(allowed[0]).toBe("u1");
 		expect(allowed).toEqual(["u1", "a1", "u2", "a2", "u3", "a3"]);
+	});
+});
+
+describe("workflow subagent compaction", () => {
+	/** No memory exists yet: a subagent has no background observer. Pi proposes to keep from u2. */
+	function uncoveredBranch(): TestEntry[] {
+		return [
+			userMessage("u0", "u".repeat(400)),
+			assistantMessage("a0", "a".repeat(400)),
+			userMessage("u1", "v".repeat(400)),
+			assistantMessage("a1", "b".repeat(400)),
+			userMessage("u2"),
+		];
+	}
+
+	it("observes the whole range before Pi's cut, past the configured chunk cap, and summarizes from memory", async () => {
+		let calls = 0;
+		mockAgents.runObserver.mockImplementation(async ({ allowedSourceEntryIds }: { allowedSourceEntryIds: string[] }) => [
+			observation((++calls).toString(16).padStart(12, "0"), { sourceEntryIds: allowedSourceEntryIds }),
+		]);
+		const { run } = setup({ entries: uncoveredBranch(), workflowSubagent: true, maxChunks: 1, observerChunkMaxTokens: 256 });
+
+		const result = await run("u2") as any;
+
+		expect(mockAgents.runObserver.mock.calls.length).toBeGreaterThan(1);
+		const observed = mockAgents.runObserver.mock.calls.flatMap((call) => call[0].allowedSourceEntryIds);
+		expect(observed).toEqual(["u0", "a0", "u1", "a1"]);
+		expect(result.compaction.firstKeptEntryId).toBe("u2");
+		expect(result.compaction.details.observations).toHaveLength(mockAgents.runObserver.mock.calls.length);
 	});
 });

@@ -13,7 +13,7 @@ import {
 	type TestEntry,
 } from "./fixtures/session.js";
 
-function captureHandler(args: { compactAfterTokens?: number; compactAfterTokensMode?: "calibrated" | "ratio"; compactAfterTokensRatio?: number; compactAtPiThresholdRatio?: number; passive?: boolean; compactInFlight?: boolean; piAutoCompactionEnabled?: boolean } = {}) {
+function captureHandler(args: { compactAfterTokens?: number; compactAfterTokensMode?: "calibrated" | "ratio"; compactAfterTokensRatio?: number; compactAtPiThresholdRatio?: number; passive?: boolean; workflowSubagent?: boolean; compactInFlight?: boolean; piAutoCompactionEnabled?: boolean } = {}) {
 	let handler: ((event: unknown, ctx: unknown) => void) | undefined;
 	const pi = {
 		on: vi.fn((name: string, cb: typeof handler) => {
@@ -32,6 +32,7 @@ function captureHandler(args: { compactAfterTokens?: number; compactAfterTokensM
 			piAutoCompactionEnabled: args.piAutoCompactionEnabled ?? true,
 		},
 		compactInFlight: args.compactInFlight ?? false,
+		workflowSubagent: args.workflowSubagent ?? false,
 		observerPromise: new Promise(() => {}),
 		reflectDropPromise: new Promise(() => {}),
 	};
@@ -109,8 +110,11 @@ describe("V3 compaction trigger", () => {
 		);
 	});
 
-	it("skips passive mode", async () => {
-		const { handler, runtime } = captureHandler({ passive: true });
+	it.each([
+		["passive mode", { passive: true }],
+		["a workflow subagent", { workflowSubagent: true }],
+	])("skips %s", async (_label, mode) => {
+		const { handler, runtime } = captureHandler(mode);
 		const ctx = fakeCtx([dueBranch]);
 
 		handler(agentSettled(), ctx);

@@ -1274,7 +1274,7 @@ function compactionDueReason(runtime, ctx, entries, threshold) {
 function maybeTriggerCompaction(runtime, ctx) {
   {
     runtime.ensureConfig(ctx.cwd);
-    if (runtime.config.passive === true) return;
+    if (runtime.config.passive === true || runtime.workflowSubagent) return;
     if (runtime.compactInFlight) return;
     const entries = ctx.sessionManager?.getBranch?.();
     if (!entries) return;
@@ -2159,14 +2159,15 @@ async function handleCompaction(pi, event, ctx, runtime) {
   const summaryMaxTokens = resolveCompactionSummaryMaxTokens(runtime.config, contextWindow);
   const reason = event.reason;
   let resolution = resolveCompactionCut(entries, firstKeptEntryId, { maxRetainedTokens, reason });
-  if (resolution.gap && runtime.config.compactionCatchUpMaxChunks > 0 && !runtime.consolidationInFlight && latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED) !== void 0) {
+  const workflowSubagent = runtime.workflowSubagent;
+  if (resolution.gap && (workflowSubagent || runtime.config.compactionCatchUpMaxChunks > 0) && !runtime.consolidationInFlight && (workflowSubagent || latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED) !== void 0)) {
     const catchUp = await catchUpObserver({
       pi,
       runtime,
       ctx,
       entries,
       gap: resolution.gap,
-      maxChunks: runtime.config.compactionCatchUpMaxChunks,
+      maxChunks: workflowSubagent ? Number.POSITIVE_INFINITY : runtime.config.compactionCatchUpMaxChunks,
       signal: event.signal
     });
     debugLog("compaction.catch_up", { ...catchUp, gapEntries: resolution.gap.entryCount, gapTokens: resolution.gap.tokens });
@@ -3282,7 +3283,7 @@ function debugSessionMetadata(ctx) {
 }
 function maybeLaunchConsolidation(pi, runtime, ctx) {
   runtime.ensureConfig(ctx.cwd);
-  if (runtime.config.passive === true) return void 0;
+  if (runtime.config.passive === true || runtime.workflowSubagent) return void 0;
   if (runtime.consolidationInFlight) return void 0;
   const entries = ctx.sessionManager.getBranch();
   if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return void 0;
@@ -3715,6 +3716,12 @@ var Runtime = class {
   consolidationAbortController;
   compactInFlight = false;
   compactHookInFlight = false;
+  /**
+   * The session is a pi-dynamic-workflows subagent. Most subagents finish
+   * before Pi compacts, so background memory work in them is usually wasted.
+   * Memory is built only when Pi compacts.
+   */
+  workflowSubagent = false;
   resolveFailureNotified = false;
   lastObserverError;
   lastReflectorError;
@@ -4313,8 +4320,17 @@ function registerRecallTool(pi) {
 }
 
 // src/index.ts
+var WORKFLOW_SUBAGENT_FLAG = "pi-dynamic-workflows-subagent";
 function observationalMemory(pi) {
   const runtime = new Runtime();
+  pi.registerFlag(WORKFLOW_SUBAGENT_FLAG, {
+    description: "Session is managed by pi-dynamic-workflows",
+    type: "boolean",
+    default: false
+  });
+  pi.on("session_start", () => {
+    runtime.workflowSubagent = pi.getFlag(WORKFLOW_SUBAGENT_FLAG) === true;
+  });
   registerConsolidationTrigger(pi, runtime, {
     afterIdleConsolidation: (ctx) => maybeTriggerCompaction(runtime, ctx)
   });
